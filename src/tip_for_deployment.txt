@@ -1,0 +1,19 @@
+Here I am deploying this project on github.com 
+1. Check your project is running and working as you expected
+    by running `npm start`
+2. if above step is done then deploy your project on github.com
+    create a repo on github.com and run below commands to push your project on created github repo
+    `git remote add origin https://github.com/Rahul-Radheshyam-Gupta/reactjs_mini_project.git`
+    `git add -a`
+    `git push -u origin master` 
+    `git commit -m "First Mini Project"`
+3. Add homepage url in package.json:
+    "homepage": "https://[YourUsernameOnGitHub].github.io/[CreatedRepoName]",
+4. if the project is pushed on the repo you created then install one package named `gh-pages'
+    this package will help us in deployment.
+    run `npm install gh-pages --save-dev`
+5. if above step is done then we have to two scripts in our scripts of package.json named predeploy and deploy
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d build",
+6. if all steps are finished then run deployment command to deploy our project on github page
+    `npm run deploy`

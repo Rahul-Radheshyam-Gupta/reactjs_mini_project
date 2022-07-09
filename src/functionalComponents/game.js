@@ -19,7 +19,7 @@ const Game = () => {
       return (
         <li key={move}>
           <button 
-          style={{textAlign:"center", width:"100%", padding:"2px 5px", marginBottom:"5px", fontFamily:"sans-serif"}}
+          style={{textAlign:"center", width:"300px", padding:"2px 5px", marginBottom:"5px", fontFamily:"sans-serif"}}
           onClick={()=> jumpToStep(move, setStepNumber, setXIsNext)}>
             {move_name}
           </button>
@@ -40,7 +40,7 @@ const Game = () => {
           Smart Tic Toe Game
         </h1>
         <div className="gameScreen">
-          <div>
+          <div class="player-detail">
             <label> X Player Name </label>
             <input type="text" value={xName} onChange={ (e)=> setXName(e.target.value)} ></input>
             <br/><br/>
@@ -66,7 +66,7 @@ const Game = () => {
             }
           />
           <div className="game-info">
-            <h2> *** Game Info *** </h2>
+            <h2 style={{ textAlign:"center", margin:"5px auto" }}> *** Game Info *** </h2>
             <h3 style={{textAlign:"center"}}> {status} </h3>
             <ul style={{textAlign:"center", listStyle:"None" }} > {moves} </ul>
           </div>

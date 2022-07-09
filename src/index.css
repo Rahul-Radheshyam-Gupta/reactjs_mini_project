@@ -31,15 +31,34 @@ code {
   justify-content: center;
 }
 .board{
-  margin: 4vh 0 30vh 0;
+  margin: 20px 0 30px 0;
   border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  justify-content: center;
+  align-items: center;
 }
+.board-row{
+  display: flex;
+  flex-direction: row;
+}
+
 .gameScreen{
   display: flex;
   flex-direction: row;
   align-content: center;
   justify-content: space-evenly;
 }
-.game-board{
 
+
+.player-detail{
+  text-align: center;
+}
+
+@media (max-width:830px) {
+  .gameScreen{
+    flex-direction: column!important;
+
+  }
 }

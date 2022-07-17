@@ -36,7 +36,6 @@ code {
   display: flex;
   flex-direction: column;
   flex-wrap: nowrap;
-  justify-content: center;
   align-items: center;
 }
 .board-row{
@@ -56,9 +55,24 @@ code {
   text-align: center;
 }
 
+.profile-card{
+  width: 80%;
+  height: 50%;
+  margin-top: 10px;
+}
 @media (max-width:830px) {
   .gameScreen{
     flex-direction: column!important;
+    width: 80%!important;
+  }
+  .profile-card{
+    width: 100%!important;
 
   }
+}
+
+.link_btn{
+  font-size :  10px;
+  height: 24px;
+  font-weight: 700;
 }

@@ -66,7 +66,6 @@ const Game = () => {
             }
           />
           <div className="game-info">
-            <h2 style={{ textAlign:"center", margin:"5px auto" }}> *** Game Info *** </h2>
             <h3 style={{textAlign:"center"}}> {status} </h3>
             <ul style={{textAlign:"center", listStyle:"None" }} > {moves} </ul>
           </div>

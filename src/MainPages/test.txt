@@ -1,0 +1,3049 @@
+from django.db import models
+import uuid
+from core.common_utils import get_shift_start_and_end_time, check_roster_weekoff
+from accounts.models import User
+from simple_history.models import HistoricalRecords
+import pytz
+from django.utils.timezone import now
+from rest_framework.exceptions import ValidationError
+import json
+import calendar
+from datetime import datetime, date, timedelta, time
+from django.utils.timezone import make_aware
+from django.core.exceptions import ObjectDoesNotExist
+from decimal import Decimal
+from django.core.validators import MaxValueValidator, MinValueValidator, MaxLengthValidator, RegexValidator
+from accounts.validators import phone_regex
+from accounts.custom_error_messages import error_messages
+from django.db.models.aggregates import Count, Sum
+from random import randint
+from dateutil.relativedelta import relativedelta
+from accounts.storage_backends import PrivateMediaStorage
+from django.core.files.uploadedfile import InMemoryUploadedFile
+import payroll
+from PIL import Image as Img
+import io
+from core.common_utils import check_weekoff, check_holiday, get_roster_shift
+from django.db import connection
+from django.db.models.functions import Coalesce
+from master.models import BankMaster, LanguageMaster, AuditMixin
+from master.ptstatemap import state_code_mapping_choices
+from model_utils import Choices
+from accounts.models import logo_image_name, LogoValidator
+from accounts.models import ClientInfo
+from django.db.models import Q
+from master.variable_value_master import EMPLOYEE_TYPE_CHOICES, CONFIRMED, TRAINEE, PROBATIONER, CUSTOM_ENTITLEMENT, \
+    Admin, HR, Supervisor, Employee_Role, External_Consultant, Temporary, ACTIVE, NOPAY, FFS_PENDING, RESIGNED, \
+    OFFSHORE, TERMINATED, ON_HOLD, NOTICE, ABSCONDED, PENDING_PRE_APPROVAL, PENDING_POST_APPROVAL
+
+# Below LEAVE_ENCASHMENT, FULL_DAY, HALF_DAY, HOURLY_LEAVE variables are same as that of available in leave.models
+FULL_DAY = 1
+HALF_DAY = 0
+LEAVE_ENCASHMENT = 2
+HOURLY_LEAVE = 3
+
+ACTIVATED = 1
+DEACTIVATED = -1
+DEFAULT = 0
+
+
+class ValidateOnSaveMixin(object):
+    """
+    This model is used to validate the Data before saving
+    """
+
+    def save(self, *args, **kwargs):
+        """Call :meth:`full_clean` before saving."""
+        self.clean_fields()
+        self.full_clean()
+        super(ValidateOnSaveMixin, self).save(*args, **kwargs)
+
+
+class Template(AuditMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(blank=True, null=True, max_length=100)
+    description = models.CharField(blank=True, null=True, max_length=100)
+    calendar = models.ForeignKey('tn_calendar.CompanyCalendar', blank=True, null=True,
+                                 on_delete=models.SET_NULL)  # Check for deprication
+    shift_policy = models.ForeignKey('attendance.ShiftSetting', blank=True, null=True, on_delete=models.PROTECT)
+    attendance_policy = models.ForeignKey('attendance.AttendancePolicy', blank=True, null=True,
+                                          on_delete=models.SET_NULL)
+    roster_policy = models.ForeignKey('attendance.RosterMaster', blank=True, null=True, on_delete=models.SET_NULL)
+    leave_configuration = models.ForeignKey('leave.LeaveConfiguration', on_delete=models.SET_NULL, blank=True,
+                                            null=True)
+    expense_policy = models.ForeignKey('expense.ExpenseConfiguration', blank=True, null=True, on_delete=models.SET_NULL)
+    timesheet_configuration = models.ForeignKey('todo.TimesheetConfiguration', blank=True, null=True,
+                                                on_delete=models.SET_NULL)
+    holiday_policy = models.ForeignKey('tn_calendar.HolidayPolicy', blank=True, null=True, on_delete=models.SET_NULL)
+    weekoff_policy = models.ForeignKey('tn_calendar.WeekOffPolicy', blank=True, null=True, on_delete=models.SET_NULL)
+    ess_workflow_definition = models.ForeignKey('WorkflowDefinition', null=True, on_delete=models.SET_NULL,
+                                                related_name="ess_workflow_definition")
+    attendance_workflow_definition = models.ForeignKey('WorkflowDefinition', null=True, on_delete=models.SET_NULL,
+                                                       related_name="attendance_workflow_definition")
+    expense_workflow_definition = models.ForeignKey('WorkflowDefinition', null=True, on_delete=models.SET_NULL,
+                                                    related_name="expense_workflow_definition")
+    leave_workflow_definition = models.ForeignKey('WorkflowDefinition', null=True, on_delete=models.SET_NULL,
+                                                  related_name="leave_workflow_definition")
+    timesheet_workflow_definition = models.ForeignKey('WorkflowDefinition', null=True, on_delete=models.SET_NULL,
+                                                      related_name="timesheet_workflow_definition")
+    employee_timezone = models.CharField(choices=[(t, t) for t in pytz.all_timezones], max_length=100,
+                                         default='Asia/Kolkata')
+    flexi_expense_workflow_definition = models.ForeignKey('WorkflowDefinition', null=True, on_delete=models.SET_NULL,
+                                                          related_name="flexi_expense_workflow_definition")
+    holiday_policy_flag = models.BooleanField(default=True)
+    weekoff_policy_flag = models.BooleanField(default=True)
+    attendance_policy_flag = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    history = HistoricalRecords()
+
+    def __str__(self):
+        return str(self.description)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class RelationshipContext(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    description = models.CharField(blank=False, max_length=100)
+    priority = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.description
+
+    class Meta:
+        ordering = ['priority']
+
+
+class OUNameValueMaster(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ou_name = models.CharField(max_length=100, db_index=True)
+    is_active = models.BooleanField(default=True)
+    is_system = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    def __str__(self):
+        return self.ou_name
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class OrganisationalUnit(models.Model):
+    """
+    This model is used to store Org Unit Values such as Mumbai for OU Location, Developer for OU Designation
+
+    id - This is field is used as Primary Key and is unique for all the values.
+    ou_value - This Field is used to store values such as Mumbai.
+    template - This field holds reference to Template table.
+    ou_name_value_master - This field holds reference to OUNameValueMaster table as it specifies which OU current value
+        will belong to. E.g. Location OU for value Mumbai.
+    is_active - This field is used to store active flag of OU Value.
+    created_at - This field is used to store Date of when OU value is created..
+
+    # Below fields are used only when Value belongs to Sub Company OU.
+    logo - This field stores logo of Sub Company Value
+    address_1 - This field stores line 1 of address
+    address_2 - This field stores line 2 of address
+    address_3 - This field stores line 3 of address
+    country - This field stores country of address
+    state - This field stores state of address
+    city - This field stores city of address
+    pin_code - This field stores pin_code of address
+    pan - This field stores pan of address
+    tan - This field stores tan of address
+
+    # Below Fields are used only when value belongs to Auto Employee Number OU.
+    pre_fix - this field is used to store Pre Fix that can be used for generating Employee Number Automatically.
+        E.g. MUM- of Employee Number MUM-000123DEV
+    post_fix - this field is used to store Post Fix that can be used for generating Employee Number Automatically.
+        E.g. DEV of Employee Number MUM-000123DEV
+    minimum_length_of_digits_in_employee_number - this field is used to store Number of Digits in Employee Number that
+        can be used for generating Employee Number Automatically
+        E.g. 6 for Employee Number MUM-000123DEV
+
+    Version     Change Detail                                           -   Issue Tracker Number
+    1.0     -   Initial build till Date 10-May-2021                     -   NA
+    1.1     -   Changes to store PRE_FIX & POST_FIX with OU, which      -   13
+                can be used later to automatically Generate Employee
+                Number
+
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ou_value = models.CharField(max_length=100, db_index=True)
+    template = models.ForeignKey(Template, on_delete=models.SET_NULL, blank=True, null=True)
+    ou_name_value_master = models.ForeignKey(OUNameValueMaster, related_name="ou_values", on_delete=models.PROTECT,
+                                             blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    is_active = models.BooleanField(default=True)
+
+    # Below Fields are used store values when OU Name is Sub Company.
+    logo = models.ImageField(upload_to=logo_image_name, validators=[LogoValidator], blank=True, null=True,
+                             max_length=255, storage=PrivateMediaStorage())
+    address_1 = models.CharField(max_length=200, null=True, blank=True)
+    address_2 = models.CharField(max_length=200, null=True, blank=True)
+    address_3 = models.CharField(max_length=200, null=True, blank=True)
+    country = models.CharField(max_length=50, null=True, blank=True)
+    state = models.CharField(max_length=50, null=True, blank=True)
+    city = models.CharField(max_length=50, null=True, blank=True)
+    pin_code = models.CharField(max_length=10, null=True, blank=True)
+    pan = models.CharField(max_length=10, null=True, blank=True)
+    tan = models.CharField(max_length=10, null=True, blank=True)
+
+    # Below Fields are used store values when OU Name is Auto Employee Number.
+    pre_fix = models.CharField(max_length=10, blank=True, null=True, default='')
+    post_fix = models.CharField(max_length=10, blank=True, null=True, default='')
+    minimum_length_of_digits_in_employee_number = models.PositiveIntegerField(null=True, blank=True, default=1)
+
+    def __str__(self):
+        return self.ou_value
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class OrganisationalGroup(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    description = models.CharField(max_length=100)
+    template = models.ForeignKey(Template, on_delete=models.SET_NULL, blank=True, null=True)
+    organisational_unit = models.ManyToManyField(OrganisationalUnit)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.description
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+ACTIVE = ACTIVE
+NOPAY = NOPAY
+FFS_PENDING = FFS_PENDING
+RESIGNED = RESIGNED
+OFFSHORE = OFFSHORE
+TERMINATED = TERMINATED
+ON_HOLD = ON_HOLD
+NOTICE = NOTICE
+ABSCONDED = ABSCONDED
+
+EMPLOYEE_STATUS_CHOICES = (
+    (ACTIVE, 'Active '),
+    (NOPAY, 'No Pay'),
+    (FFS_PENDING, 'FFS Pending'),
+    (RESIGNED, 'Resigned'),
+    (OFFSHORE, 'Offshore'),
+    (TERMINATED, 'Terminated'),
+    (ON_HOLD, 'On Hold'),
+    (NOTICE, 'Notice'),
+    (ABSCONDED, 'Absconded'),
+)
+
+RELATIONSHIP_PROJECT = 'Project'
+RELATIONSHIP_DEPARTMENT = 'Department'
+
+# Below values are used to store Status of Auto Generation of Employee Number
+TEMPORARY_NUMBER = 'T'
+PERMANENT_NUMBER = 'P'
+NOT_AUTO_GENERATED = 'N'
+
+
+##########################
+# EMPLOYEE MODEL
+##########################
+
+
+class Employee(ValidateOnSaveMixin, models.Model):
+    """
+    This model is used to store all the information related to Employee
+
+    Version     Change Detail                                           -   Issue Tracker Number
+    1.0     -   Initial build till Date 10-May-2021                     -   NA
+    1.1     -   Changes to add new Employee Role Temporary to allow     -   13
+                Temporary Id Generation before joining
+    1.2     -   Added new Field employee_number_auto_generation_status  -   13
+                to control Auto Generation of Employee Number
+
+    """
+
+    EMPLOYEE_ROLE_CHOICES = (
+        (Admin, 'Administrator'),
+        (HR, 'Human Resource Head'),
+        (Supervisor, 'Supervisor'),
+        (Employee_Role, 'Employee'),
+        (External_Consultant, 'External Consultant'),
+        (Temporary, 'Role of Employee Before joining)')
+    )
+
+    DIRECTLY = 0
+    FROM_OU = 1
+    FROM_OU_GROUP = 2
+
+    TEMPLATE_ASSIGNMENT_CHOICES = (
+        (DIRECTLY, 'Directly '),
+        (FROM_OU, 'From OU'),
+        (FROM_OU_GROUP, 'From OU Group'),
+    )
+
+    CHQ = "CHQ"
+    CASH = "CASH"
+    NEFT = "NEFT"
+    EMPLOYEE_PAYMENT_CHOICES = (
+        (CHQ, 'CHQ '),
+        (CASH, 'Cash'),
+        (NEFT, 'NEFT'),
+    )
+
+    REGULAR = "REGULAR"
+    CONTRACT = "CONTRACT"
+    PROFESSIONAL = "PROFESSIONAL"
+    DAILY_WAGE = "DAILY_WAGE"
+    HOURLY = "HOURLY"
+
+    EMPLOYEE_WORKTYPE_CHOICES = (
+        (REGULAR, 'Regular'),
+        (CONTRACT, 'Contract'),
+        (PROFESSIONAL, 'Professional'),
+        (DAILY_WAGE, 'Daily Wage'),
+        (HOURLY, 'Hourly'),
+    )
+
+    AUTO_GENERATION_CHOICES = (
+        (TEMPORARY_NUMBER, 'Temporary Employee Number Auto Generated'),
+        (PERMANENT_NUMBER, 'Permanent Employee Number Auto Generated'),
+        (NOT_AUTO_GENERATED, 'Employee Number Received Manually & is not Auto Generated')
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(User, null=True, blank=True, on_delete=models.PROTECT)
+    email = models.EmailField(max_length=254, null=True, blank=True, unique=True)
+    mobile_number = models.CharField(unique=True, validators=[phone_regex],
+                                     error_messages={"unique": error_messages[1003]['detail']}, max_length=30,
+                                     blank=True, null=True)
+    employee_number = models.CharField(blank=True, max_length=100, unique=True)
+    role = models.CharField(blank=False, choices=EMPLOYEE_ROLE_CHOICES, max_length=30, db_index=True)
+    changed_by = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='changed_for_employee', null=True)
+    organisational_unit = models.ManyToManyField(OrganisationalUnit, related_name='employees')
+    template = models.ForeignKey(Template, on_delete=models.SET_NULL, blank=True, null=True,
+                                 related_name="employees_under_template")
+    template_assignment = models.IntegerField(blank=True, null=True, choices=TEMPLATE_ASSIGNMENT_CHOICES)
+    relationships = models.ManyToManyField('self', through='Relationship', symmetrical=False, related_name='related_to')
+    send_invite = models.BooleanField(default=False)
+    employee_type = models.IntegerField(null=True, blank=True, choices=EMPLOYEE_TYPE_CHOICES)
+    date_of_joining = models.DateField(blank=True, null=True, db_index=True)
+    date_of_confirmation = models.DateField(blank=True, null=True, db_index=True)
+    termination_date = models.DateField(blank=True, null=True, db_index=True)
+    termination_reason = models.CharField(blank=True, max_length=500)
+    probation_period = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    notice_period = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    resignation_date = models.DateField(blank=True, null=True, db_index=True)
+    exclude_payroll = models.BooleanField(default=False)
+    state_of_pt = models.CharField(blank=True, max_length=100, choices=state_code_mapping_choices)
+    employee_status = models.CharField(blank=False, default=ACTIVE, choices=EMPLOYEE_STATUS_CHOICES, max_length=30,
+                                       db_index=True)
+    employee_worktype = models.CharField(blank=False, default=REGULAR, choices=EMPLOYEE_WORKTYPE_CHOICES, max_length=30)
+
+    # Flags for Statutory Deductions
+    metro_app = models.BooleanField(default=False)
+    esic_app = models.BooleanField(default=False)
+    tds_app = models.BooleanField(default=True)
+    tds_app_new = models.BooleanField(default=False)
+    pfcapped_app = models.BooleanField(default=False)
+    pfuncapped_app = models.BooleanField(default=False)
+    pt_app = models.BooleanField(default=False)
+    lwf_app = models.BooleanField(default=False)
+
+    ctc_master = models.ForeignKey('payroll.CTCBuilderMaster', on_delete=models.SET_NULL, null=True, blank=True)
+    monthly_ctc = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal(0))
+    annual_ctc = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal(0))
+    attendance_code = models.CharField(blank=True, null=True, max_length=100, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    payment_mode = models.CharField(blank=True, null=True, choices=EMPLOYEE_PAYMENT_CHOICES, max_length=10)
+    payment_bank = models.ForeignKey(BankMaster, on_delete=models.SET_NULL, blank=True, null=True)
+    payment_number = models.CharField(blank=True, null=True, max_length=25)
+    payment_name = models.CharField(blank=True, null=True, max_length=200)
+    ifsc_code = models.CharField(blank=True, null=True, max_length=15)
+    pf_number = models.CharField(blank=True, null=True, max_length=25)
+    uan_number = models.CharField(blank=True, null=True, max_length=15)
+    esic_number = models.CharField(blank=True, null=True, max_length=15)
+    is_handicapped = models.BooleanField(default=False)
+    is_handicapped_spouse = models.BooleanField(default=False)
+    spouse_working = models.BooleanField(default=False)
+    actual_investments = models.BooleanField(default=False)
+    daily_wage = models.BooleanField(default=False)
+    language = models.ForeignKey(LanguageMaster, default=LanguageMaster.objects.get(language='English').id,
+                                 on_delete=models.SET_NULL, blank=True, null=True)
+    user_selected_timezone = models.CharField(choices=[(t, t) for t in pytz.all_timezones], max_length=100,
+                                              default='Asia/Kolkata')
+    local_timezone_flag = models.BooleanField(default=True)
+    mfa_enabled = models.BooleanField(default=False)
+    is_login_restricted = models.BooleanField(default=False)
+    employee_number_auto_generation_status = models.CharField(null=True, blank=True, choices=AUTO_GENERATION_CHOICES,
+                                                              max_length=1, default=NOT_AUTO_GENERATED)
+
+    is_active = models.BooleanField(default=True)
+    history = HistoricalRecords()
+    recruitment_method = models.CharField(blank=True, max_length=500)
+
+    def clean(self):
+        if not self.email:
+            self.email = None
+
+        if not self.mobile_number:
+            self.mobile_number = None
+
+        employee_object = Employee.objects.filter(is_active=True).exclude(id=self.id)
+        self_employee_object = Employee.objects.filter(id=self.id).first()
+        if self.attendance_code and self_employee_object and self_employee_object.attendance_code != self.attendance_code:
+            employee_with_same_attendance_code = employee_object.filter(attendance_code=self.attendance_code)
+            if employee_with_same_attendance_code:
+                raise ValidationError({
+                    'Attendance Code': 'Can not add/update as Attendance Code is already assigned to Employee Number '
+                                       '- ' + employee_with_same_attendance_code.first().employee_number
+                })
+
+        if self.payment_number and self_employee_object and self_employee_object.payment_number != self.payment_number:
+            employee_with_same_payment_number = employee_object.filter(payment_number=self.payment_number)
+            if employee_with_same_payment_number:
+                raise ValidationError({
+                    'Account Number': 'Can not add/update as Account Number is already assigned to Employee Number - ' +
+                                      employee_with_same_payment_number.first().employee_number
+                })
+
+    @property
+    def _history_user(self):
+        return self.changed_by
+
+    @_history_user.setter
+    def _history_user(self, value):
+        self.changed_by = value
+
+    def add_relationship(self, employee, relationship_context):
+        relationship, created = Relationship.objects.get_or_create(
+            supervisor=self,
+            direct_reportees=employee,
+            relationship_context=relationship_context)
+        return relationship
+
+    def remove_relationship(self, employee, relationship_context):
+        Relationship.objects.filter(
+            supervisor=self,
+            direct_reportees=employee,
+            relationship_type=relationship_context).delete()
+        return
+
+    def get_relationships(self, relationship_context):
+        return self.relationships.filter(
+            direct_reportees__relationship_context=relationship_context,
+            direct_reportees__supervisor=self)
+
+    def get_related_to(self, relationship_context):
+        return self.related_to.filter(
+            supervisors__relationship_context=relationship_context,
+            supervisors__direct_reportee=self)
+
+    '''
+    def get_direct_reportees(self):
+        return self.get_relationships(RELATIONSHIP_PROJECT)
+
+    def get_supervisors(self):
+        return self.get_related_to(RELATIONSHIP_PROJECT)
+
+    '''
+
+    def get_all_relationships(self):
+        return self.relationships.filter(
+            supervisors__direct_reportee=self,
+            direct_reportees__supervisor=self)
+
+    def __str__(self):
+        return self.employee_number
+
+    class Meta:
+        ordering = ['employee_number']
+
+
+class WorkflowDefinition(AuditMixin, models.Model):
+    SEQUENTIAL = 'SEQUENTIAL'
+    PARALLEL = 'PARALLEL'
+
+    WORKFLOW_TYPE_CHOICES = (
+        (SEQUENTIAL, 'Sequential'),
+        (PARALLEL, 'Parallel'),
+
+    )
+
+    SPECIFIC = 'SPECIFIC'
+    HIERARCHICAL = 'HIERARCHICAL'
+
+    WORKFLOW_DESC_CHOICES = (
+        (SPECIFIC, 'SPECIFIC'),
+        (HIERARCHICAL, 'HIERARCHICAL'),
+
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    description = models.CharField(max_length=100)
+    workflow_type = models.CharField(blank=True, choices=WORKFLOW_TYPE_CHOICES, max_length=100, null=True)
+    workflow_desc = models.CharField(blank=True, choices=WORKFLOW_DESC_CHOICES, max_length=100, null=True)
+    no_of_levels = models.IntegerField(null=True, blank=True)
+    workflow_context_hierarchical = models.ForeignKey(RelationshipContext, on_delete=models.SET_NULL, null=True,
+                                                      blank=True)
+    confirmation_by_all = models.BooleanField(default=False)
+    confirmation_by_all_connected = models.BooleanField(default=False)
+    confirmation_by_all_both = models.BooleanField(default=False)
+    is_workflow_combination = models.BooleanField(default=False)
+    child_workflows = models.ManyToManyField('self', symmetrical=False, related_name='parent_workflow', blank=True)
+    # workflow_by_role = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    cc = models.ManyToManyField(Employee, symmetrical=False, blank=True)
+    history = HistoricalRecords()
+
+    def __str__(self):
+        return self.description
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class WorkflowSequence(AuditMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    description = models.CharField(max_length=100)
+    context = models.ForeignKey(RelationshipContext, on_delete=models.PROTECT)
+    order = models.IntegerField(null=True, blank=True, db_index=True)
+    workflow_definition = models.ForeignKey(WorkflowDefinition, on_delete=models.PROTECT, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    history = HistoricalRecords()
+
+    def __str__(self):
+        return self.description
+
+    class Meta:
+        unique_together = ('context', 'workflow_definition')
+        ordering = ['-created_at']
+
+
+class WorkflowSequenceDirect(AuditMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    description = models.CharField(max_length=100)
+    context = models.ForeignKey(RelationshipContext, on_delete=models.PROTECT)
+    order = models.IntegerField(null=True, blank=True, db_index=True)
+    workflow_definition = models.ForeignKey(WorkflowDefinition, on_delete=models.PROTECT, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    history = HistoricalRecords()
+
+    def __str__(self):
+        return self.description
+
+    class Meta:
+        unique_together = ('context', 'workflow_definition')
+        ordering = ['-created_at']
+
+
+class LoginTrail(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    login_at = models.DateTimeField()
+    ip = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class Relationship(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    supervisor = models.ForeignKey(Employee, related_name='supervisors', null=True, blank=True)
+    direct_reportee = models.ManyToManyField(Employee, symmetrical=False, related_name='direct_reportees', blank=True)
+    relationship_context = models.ForeignKey(RelationshipContext, on_delete=models.PROTECT, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+
+def image_file_name(instance, filename):
+    return '%s/%s/%s' % (connection.schema_name, '/profilePhotos/img', filename)
+
+
+def user_doc_file_name(instance, filename):
+    return '%s/%s/%s' % (connection.schema_name, '/UserDocuments/docs', filename)
+
+
+def request_supporting_file_name(instance, filename):
+    return '%s/%s/%s' % (connection.schema_name, '/request_supporting_doc', filename)
+
+
+def tenant_config_file_name(instance, filename):
+    return '%s/%s/%s' % (connection.schema_name, '/tenant_config_templates', filename)
+
+
+class PersonalInformation(ValidateOnSaveMixin, models.Model):
+    MALE = "Male"
+    FEMALE = "Female"
+    OTHER = "Other"
+
+    GENDER_CHOICES = (
+        (MALE, 'Male'),
+        (FEMALE, 'Female'),
+        (OTHER, 'Other'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.OneToOneField(Employee, on_delete=models.PROTECT, null=True, blank=True)
+    image = models.ImageField(upload_to=image_file_name, null=True, blank=True, max_length=255,
+                              storage=PrivateMediaStorage())
+    compressed_image = models.ImageField(upload_to=image_file_name, null=True, blank=True, max_length=255,
+                                         storage=PrivateMediaStorage())
+    short_bio = models.CharField(blank=True, null=True, max_length=50)
+    long_bio = models.CharField(blank=True, null=True, max_length=1000)
+    prefix = models.CharField(blank=True, null=True, max_length=5)
+    first_name = models.CharField(blank=True, null=True, max_length=50)
+    middle_name = models.CharField(blank=True, null=True, max_length=50)
+    last_name = models.CharField(blank=True, null=True, max_length=50)
+    full_name = models.CharField(blank=True, null=True, max_length=100)
+    maiden_name = models.CharField(blank=True, max_length=30, null=True)
+    preferred_name = models.CharField(blank=True, max_length=30, null=True)
+    second_name = models.CharField(blank=True, max_length=30, null=True)
+    identification_mark = models.CharField(blank=True, null=True, max_length=30)
+    date_of_birth = models.DateField(blank=True, null=True)
+    birth_place = models.CharField(blank=True, null=True, max_length=50)
+    gender = models.CharField(blank=True, null=True, max_length=7, choices=GENDER_CHOICES)
+    accommodation_type = models.CharField(blank=True, null=True, max_length=20)
+    address_1 = models.CharField(blank=True, null=True, max_length=100)
+    address_2 = models.CharField(blank=True, max_length=100, null=True)
+    location = models.CharField(blank=True, null=True, max_length=20)
+    landmark = models.CharField(blank=True, max_length=20, null=True)
+    country = models.CharField(blank=True, null=True, max_length=20)
+    state = models.CharField(blank=True, null=True, max_length=20)
+    city = models.CharField(blank=True, null=True, max_length=20)
+    zip_code = models.CharField(blank=True, null=True, max_length=20)
+    nationality = models.CharField(blank=True, max_length=20)
+    mother_tongue = models.CharField(blank=True, null=True, max_length=10)
+    mobile_number_1 = models.CharField(blank=True, null=True, validators=[phone_regex],
+                                       error_messages={"unique": error_messages[1003]['detail']}, max_length=16)
+    mobile_number_2 = models.CharField(blank=True, null=True, validators=[phone_regex],
+                                       error_messages={"unique": error_messages[1003]['detail']}, max_length=16)
+    landline_number = models.CharField(blank=True, null=True, max_length=20)
+    personal_email_id = models.CharField(blank=True, null=True, max_length=254)
+    blood_group = models.CharField(blank=True, max_length=5, null=True)
+    ethnicity = models.CharField(blank=True, max_length=10, null=True)
+    marital_status = models.CharField(blank=True, max_length=10, null=True)
+    marriage_anniversary_date = models.DateField(blank=True, null=True)
+    caste = models.CharField(blank=True, max_length=10, null=True)
+    sub_caste = models.CharField(blank=True, max_length=10, null=True)
+    religion = models.CharField(blank=True, max_length=10, null=True)
+    driving_license_number = models.CharField(blank=True, null=True, max_length=20)
+    dl_place_of_issue = models.CharField(blank=True, max_length=20, null=True)
+    dl_date_of_issue = models.DateField(blank=True, null=True)
+    dl_expiry_date = models.DateField(blank=True, null=True)
+    identification_number = models.CharField(blank=True, max_length=20, null=True)
+    id_place_of_issue = models.CharField(blank=True, max_length=20, null=True)
+    id_issued_by = models.CharField(blank=True, max_length=20, null=True)
+    unique_id = models.CharField(blank=True, max_length=20, null=True)
+    social_insurance_number = models.CharField(blank=True, max_length=20, null=True)
+    ssn = models.CharField(blank=True, max_length=20, null=True)
+    national_id_number = models.CharField(blank=True, max_length=20, null=True)
+    insurance_number = models.CharField(blank=True, max_length=20, null=True)
+    sss_number = models.CharField(blank=True, max_length=20, null=True)
+    tin = models.CharField(blank=True, max_length=20, null=True)
+    pan = models.CharField(blank=True, max_length=20, null=True)
+    pan_issue_place = models.CharField(blank=True, max_length=20, null=True)
+    passport_number = models.CharField(blank=True, max_length=20, null=True)
+    passport_issue_place = models.CharField(blank=True, max_length=20, null=True)
+    passport_issue_date = models.DateField(blank=True, null=True)
+    passport_expiry_date = models.DateField(blank=True, null=True)
+    height = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True, )
+    weight = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
+    skills = models.TextField(blank=True, null=True, max_length=2000)
+    company_assets = models.TextField(blank=True, null=True, max_length=2000)
+    med_disease_description = models.TextField(blank=True, null=True, max_length=2000)
+    med_past_operation = models.TextField(blank=True, null=True, max_length=2000)
+    med_recent_medication = models.TextField(blank=True, null=True, max_length=2000)
+    med_restriction = models.TextField(blank=True, null=True, max_length=2000)
+    med_physician_name = models.CharField(blank=True, null=True, max_length=50)
+    med_physician_contact = models.BigIntegerField(blank=True, null=True,
+                                                   validators=[MaxValueValidator(limit_value=999999999999),
+                                                               MinValueValidator(limit_value=999999)])
+    med_note = models.TextField(blank=True, null=True, max_length=2000)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_personal_info')
+    pan_doc = models.FileField(upload_to=user_doc_file_name, blank=True, null=True, max_length=255,
+                               storage=PrivateMediaStorage())
+    driving_license_doc = models.FileField(upload_to=user_doc_file_name, blank=True, null=True, max_length=255,
+                                           storage=PrivateMediaStorage())
+    uid_doc = models.FileField(upload_to=user_doc_file_name, blank=True, null=True, max_length=255,
+                               storage=PrivateMediaStorage())
+    passport_doc = models.FileField(upload_to=user_doc_file_name, blank=True, null=True, max_length=255,
+                                    storage=PrivateMediaStorage())
+    national_id_document = models.FileField(upload_to=user_doc_file_name, blank=True, null=True, max_length=255,
+                                            storage=PrivateMediaStorage())
+    no_of_children = models.PositiveIntegerField(default=0)
+    no_of_children_in_he = models.PositiveIntegerField(default=0)
+    no_of_children_handicapped = models.PositiveIntegerField(default=0)
+    no_of_children_handicapped_in_he = models.PositiveIntegerField(default=0)
+    work_expiry_date = models.DateField(blank=True, null=True)
+
+    emergency_contact_name_1 = models.CharField(null=True, blank=True, max_length=255)
+    emergency_contact_number_1 = models.CharField(blank=True, null=True, validators=[phone_regex],
+                                                  error_messages={"unique": error_messages[1003]['detail']},
+                                                  max_length=16)
+    emergency_contact_relation_1 = models.CharField(null=True, blank=True, max_length=255)
+
+    emergency_contact_name_2 = models.CharField(null=True, blank=True, max_length=255)
+    emergency_contact_number_2 = models.CharField(blank=True, null=True, validators=[phone_regex],
+                                                  error_messages={"unique": error_messages[1003]['detail']},
+                                                  max_length=16)
+    emergency_contact_relation_2 = models.CharField(null=True, blank=True, max_length=255)
+
+    history = HistoricalRecords()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return str(self.first_name)
+
+    def clean(self):
+
+        print("saving compressed image")
+        try:
+            if self.image:
+                img = Img.open(io.BytesIO(self.image.read()))
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                img.thumbnail((self.image.width / 1.5, self.image.height / 1.5), Img.ANTIALIAS)
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=70)
+                output.seek(0)
+                self.compressed_image = InMemoryUploadedFile(output, 'ImageField',
+                                                             "%s.jpg" % self.image.name.split('.')[0], 'image/jpeg',
+                                                             output.len, None)
+        except Exception as e:
+            print("Unable to compress image")
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class Birthday(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.OneToOneField(Employee, on_delete=models.PROTECT)
+    birthday = models.PositiveIntegerField(blank=True, null=True, db_index=True)
+    birthmonth = models.PositiveIntegerField(blank=True, null=True, db_index=True)
+    birthyear = models.PositiveIntegerField(blank=True, null=True, db_index=True)
+    birthdate = models.DateField(blank=True, null=True, db_index=True)
+
+
+class FamilyInformation(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='familyinformation')
+    prefix = models.CharField(blank=False, max_length=5)
+    first_name = models.CharField(blank=False, max_length=50)
+    middle_name = models.CharField(blank=False, max_length=50, null=True)
+    last_name = models.CharField(blank=True, max_length=50, null=True)
+    relation = models.CharField(blank=True, max_length=20, null=True)
+    flat_number = models.CharField(blank=True, max_length=20, null=True)
+    apartment_name = models.CharField(blank=True, max_length=20, null=True)
+    plot_number = models.CharField(blank=True, max_length=20, null=True)
+    area = models.CharField(blank=True, max_length=20, null=True)
+    street_1 = models.CharField(blank=True, max_length=20, null=True)
+    street_2 = models.CharField(blank=True, max_length=20, null=True)
+    location = models.CharField(blank=True, max_length=20, null=True)
+    landmark = models.CharField(blank=True, max_length=20, null=True)
+    zip_code = models.PositiveIntegerField(blank=True, null=True)
+    country = models.CharField(blank=False, max_length=20, null=True)
+    state = models.CharField(blank=False, max_length=20, null=True)
+    city = models.CharField(blank=False, max_length=20, null=True)
+    email_id = models.CharField(blank=True, max_length=30, null=True)
+    code = models.UUIDField(default=uuid.uuid4, editable=False)
+    contact_number = models.BigIntegerField(blank=True, null=True,
+                                            validators=[MaxValueValidator(limit_value=999999999999),
+                                                        MinValueValidator(limit_value=999999)])
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_family_info')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+    date_of_birth = models.DateField(blank=True, null=True)
+
+    def __str__(self):
+        return self.first_name
+
+
+class AcademicMaster(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(blank=True, max_length=100, null=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.name
+
+
+class AcademicDetail(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='academicdetail')
+    degree = models.CharField(blank=True, max_length=100, null=True)
+    qualification_master = models.ForeignKey(AcademicMaster, on_delete=models.PROTECT, null=True, blank=True)
+    institute_name = models.CharField(blank=True, max_length=100, null=True)
+    qualification = models.CharField(blank=True, max_length=100, null=True, db_index=True)
+    university_name = models.CharField(blank=True, max_length=100, null=True)
+    specialization = models.CharField(blank=True, max_length=100, null=True)
+    course_start_date = models.DateField(blank=True, null=True)
+    course_end_date = models.DateField(blank=True, null=True)
+    result_declared_on = models.DateField(blank=True, null=True)
+    marks_obtained = models.IntegerField(blank=True, null=True)
+    total_marks = models.IntegerField(blank=True, null=True)
+    percentage = models.FloatField(blank=True, null=True)
+    class_secured = models.CharField(blank=True, max_length=100, null=True)
+    professional_field = models.CharField(blank=True, max_length=100, null=True)
+    country = models.CharField(blank=True, max_length=100, null=True)
+    state = models.CharField(blank=True, max_length=100, null=True)
+    city = models.CharField(blank=True, max_length=100, null=True)
+    code = models.UUIDField(default=uuid.uuid4, editable=False, blank=True, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_academic_detail')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+    document = models.FileField(upload_to=user_doc_file_name, null=True, max_length=255, storage=PrivateMediaStorage())
+
+    def __str__(self):
+        return self.institute_name
+
+
+class VisaInformation(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='visainformation')
+    issuing_country = models.CharField(blank=True, max_length=100, null=True)
+    visa_type = models.CharField(blank=True, max_length=10, null=True)
+    current_status = models.CharField(blank=True, max_length=20, null=True)
+    visa_duration = models.CharField(blank=True, max_length=20, null=True)
+    duration_type = models.CharField(blank=True, max_length=20, null=True)
+    issuing_authority = models.CharField(blank=True, max_length=50, null=True)
+    place_of_issue = models.CharField(blank=True, max_length=20, null=True)
+    date_of_issue = models.DateField(blank=True, null=True)
+    date_of_expiry = models.DateField(blank=True, null=True)
+    code = models.UUIDField(default=uuid.uuid4, editable=False, blank=True, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_visa')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.issuing_authority
+
+
+class MedicalHistory(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='medicalhistory')
+    heart_defect_disease = models.CharField(blank=True, max_length=100, null=True)
+    epilepsy_diagnosed = models.CharField(blank=True, max_length=100, null=True)
+    diabetes = models.CharField(blank=True, max_length=20, null=True)
+    blood_clotting_disorder = models.CharField(blank=True, max_length=20, null=True)
+    frequent_hypertension = models.CharField(blank=True, max_length=20, null=True)
+    asthma = models.CharField(blank=True, max_length=20, null=True)
+    allergies_list = models.CharField(blank=True, max_length=20, null=True)
+    past_operation = models.CharField(blank=True, max_length=20, null=True)
+    recent_medication = models.CharField(blank=True, max_length=20, null=True)
+    medical_restriction = models.CharField(blank=True, max_length=20, null=True)
+    note = models.CharField(blank=True, max_length=20, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_medical_history')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.note
+
+
+class VehicleDetail(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='vehicledetail')
+    vehicle_type = models.CharField(blank=True, max_length=100, null=True)
+    vehicle_brand = models.CharField(blank=True, max_length=100, null=True)
+    registration_number = models.CharField(blank=True, max_length=100, null=True)
+    registered_owner = models.CharField(blank=True, max_length=100, null=True)
+    transmission = models.CharField(blank=True, max_length=100, null=True)
+    parking_allocated = models.BooleanField(default=False)
+    code = models.UUIDField(default=uuid.uuid4, editable=False, blank=True, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_vehicle_detail')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.vehicle_type
+
+
+class Experience(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='experience')
+    title = models.CharField(blank=True, max_length=100, null=True)
+    company_name = models.CharField(blank=True, max_length=100, null=True)
+    location = models.CharField(blank=True, max_length=500, null=True)
+    worked_from = models.DateField(blank=True, null=True)
+    worked_to = models.DateField(blank=True, null=True)
+    work_experience_description = models.CharField(max_length=5000, null=True, blank=True)
+    currently_here = models.BooleanField(default=False)
+    code = models.UUIDField(default=uuid.uuid4, editable=False, blank=True, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_employee_experience')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+    document = models.FileField(upload_to=user_doc_file_name, null=True, max_length=255, storage=PrivateMediaStorage())
+
+    def __str__(self):
+        return self.company_name
+
+
+class Accommodation(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='accommodation')
+    accommodation_type = models.CharField(blank=True, null=True, max_length=10)
+    address_1 = models.CharField(blank=True, null=True, max_length=100)
+    address_2 = models.CharField(blank=True, max_length=100, null=True)
+    location = models.CharField(blank=True, null=True, max_length=20)
+    landmark = models.CharField(blank=True, max_length=20, null=True)
+    country = models.CharField(blank=True, null=True, max_length=20)
+    state = models.CharField(blank=True, null=True, max_length=20)
+    city = models.CharField(blank=True, null=True, max_length=20)
+    zip_code = models.CharField(blank=True, null=True, max_length=20)
+    currently_here = models.BooleanField(default=False)
+    code = models.UUIDField(default=uuid.uuid4, editable=False, blank=True, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_accommodation')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return str(self.id)
+
+
+class AssetMaster(AuditMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(blank=True, max_length=100, null=True)
+    asset_code = models.CharField(null=True, blank=True, max_length=250)
+    date_of_purchase = models.DateField(null=True, blank=True)
+    cost_of_assets = models.IntegerField(null=True, blank=True)
+    asset_description = models.TextField(blank=True, max_length=5000, null=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return str(self.name)
+
+    class Meta:
+        ordering = ['name']
+
+
+class Asset(AuditMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='asset')
+    asset_name = models.ForeignKey(AssetMaster, on_delete=models.PROTECT, related_name='asset_detail', null=True)
+    description = models.TextField(blank=True, max_length=1000, null=True)
+    deduct_emi = models.BooleanField(default=False)
+    asset_issue_date = models.DateField(blank=True, null=True)
+    deduct_value = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, default=Decimal(0))
+    asset_recover = models.BooleanField(default=False)
+    asset_return_date = models.DateField(null=True)
+    total = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, default=Decimal(0))
+    balance = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, default=Decimal(0))
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_employee_asset')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+    frequency_of_payment = models.CharField(null=True, blank=True, max_length=255)
+
+    def __str__(self):
+        return self.description
+
+
+class BankInformation(AuditMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='bankinformation')
+    name = models.CharField(blank=True, max_length=100, null=True)
+    account_number = models.CharField(blank=True, max_length=30, null=True)
+    ifsc_code = models.CharField(blank=True, max_length=30, null=True)
+    branch = models.CharField(blank=True, max_length=100, null=True)
+    address = models.CharField(blank=True, max_length=500, null=True)
+    code = models.UUIDField(default=uuid.uuid4, editable=False, blank=True, null=True)
+    same_as_profile = models.BooleanField(default=True)
+    is_salary_account = models.BooleanField(default=False)
+    holder_name = models.CharField(blank=True, max_length=100, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_bank_information')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.name
+
+
+class Skill(ValidateOnSaveMixin, models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='skill')
+    description = models.CharField(blank=True, max_length=100, null=True)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_employee_skill')
+    history = HistoricalRecords()
+
+    def __str__(self):
+        return self.description
+
+
+class UserDocuments(models.Model):
+    USER_DOC_PAY_SLIPS = 0
+    USER_DOC_ELC = 1
+    USER_DOC_HR_POLICIES = 2
+    USER_DOC_PERSONAL = 3
+
+    USER_DOCUMENTS_CHOICES = (
+
+        (USER_DOC_PAY_SLIPS, 'Pay Slips'),
+        (USER_DOC_ELC, 'ELC '),
+        (USER_DOC_HR_POLICIES, 'HR Policies'),
+        (USER_DOC_PERSONAL, 'My Assist'),
+
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='userdocuments')
+    category = models.IntegerField(blank=True, null=True, choices=USER_DOCUMENTS_CHOICES)
+    title = models.CharField(blank=True, max_length=20, null=True)
+    document = models.FileField(upload_to=user_doc_file_name, null=True, max_length=255, storage=PrivateMediaStorage())
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_user_doc')
+    history = HistoricalRecords()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.title
+
+
+class CustomFields(models.Model):
+    PersonalInfo = 1
+    FamilyInfo = 2
+    Medical = 3
+    Vehicle = 4
+    Academic = 5
+    UserDoc = 6
+    VisaInfo = 7
+
+    CATEGORIES_CHOICES = (
+        (PersonalInfo, 'Personal Information'),
+        (FamilyInfo, 'Family Information'),
+        (Medical, 'Medical History'),
+        (Vehicle, 'Vehicle Details'),
+        (Academic, 'Academic Details'),
+        (UserDoc, 'User Documents'),
+        (VisaInfo, 'Visa Information'),
+    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    field_name = models.CharField(max_length=10)
+    categories = models.IntegerField(blank=False, choices=CATEGORIES_CHOICES, default=UserDoc)
+    has_value = models.BooleanField(default=True)
+    has_expiry = models.BooleanField(default=False)
+    has_document = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+
+class CustomFieldValues(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    field_id = models.ForeignKey(CustomFields, on_delete=models.PROTECT)
+    value = models.CharField(blank=False, max_length=1000)
+    date_value = models.DateField(blank=True, null=True)
+    document = models.FileField(upload_to=user_doc_file_name, null=True, max_length=255, storage=PrivateMediaStorage())
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='changed_for_custom_values')
+
+
+STARTED = 'STARTED'
+PENDING = 'PENDING'
+APPROVED = 'APPROVED'
+REJECTED = 'REJECTED'
+CANCELLED = 'CANCELLED'
+FINISHED = 'FINISHED'
+DRAFT = 'DRAFT'
+
+PROCESS_STATUS_LIST = [
+    'STARTED', 'PENDING', 'APPROVED', 'REJECTED', 'CANCELLED', 'FINISHED', 'DRAFT', 'PENDING_PRE_APPROVAL',
+    'PENDING_POST_APPROVAL', 'PRE_APPROVED', 'POST_APPROVED',
+]
+
+STATUS_CHOICES = (
+    (STARTED, 'Started'),
+    (PENDING, 'Pending'),
+    (APPROVED, 'Approved'),
+    (REJECTED, 'Rejected'),
+    (CANCELLED, 'Cancelled'),
+    (FINISHED, 'Finished'),
+    (DRAFT, 'Draft'),
+    (PENDING_PRE_APPROVAL, 'Pending Pre Approval'),
+    (PENDING_POST_APPROVAL, 'Pending Post Approval'),
+
+)
+
+
+def count_leaves_sandwich(leave_calculation, emp_obj, balance_setting):
+    no_of_days_for_leave = leave_calculation['leave_end'] - leave_calculation['leave_start'] + timedelta(days=1)
+    no_of_days_for_leave = Decimal(no_of_days_for_leave.days)
+    if balance_setting.sandwich_leave_prior_post_week_off and emp_obj.template.weekoff_policy:
+        # Was prior week off
+
+        if check_weekoff(emp_obj.template.weekoff_policy, leave_calculation['leave_start'] - timedelta(days=1),
+                         emp_obj):
+            # employee_leave_cal.no_of_leaves_taken_for_current_period += 1
+            no_of_days_for_leave += 1
+        # was Post week off
+        if check_weekoff(emp_obj.template.weekoff_policy, leave_calculation['leave_end'] + timedelta(days=1), emp_obj):
+            # employee_leave_cal.no_of_leaves_taken_for_current_period += 1
+            no_of_days_for_leave += 1
+
+    if balance_setting.sandwich_leave_prior_post_holiday:
+        # Was prior Holiday
+        if check_holiday(leave_calculation['leave_start'] - timedelta(days=1), emp_obj):
+            # employee_leave_cal.no_of_leaves_taken_for_current_period += 1
+            no_of_days_for_leave += 1
+        # was Post Holiday
+        if check_holiday(leave_calculation['leave_end'] + timedelta(days=1), emp_obj):
+            # employee_leave_cal.no_of_leaves_taken_for_current_period += 1
+            no_of_days_for_leave += 1
+
+    if balance_setting.sandwich_leave_between_week_off:
+        # employee_leave_cal.no_of_leaves_taken_for_current_period
+        start_temp = leave_calculation['leave_start']
+        while start_temp < leave_calculation['leave_end']:
+            start_temp += timedelta(days=1)
+            if check_weekoff(emp_obj.template.weekoff_policy, start_temp, emp_obj):
+                # no_of_days_for_leave+=1
+                pass
+    else:
+        # employee_leave_cal.no_of_leaves_taken_for_current_period
+        start_temp = leave_calculation['leave_start']
+        while start_temp < leave_calculation['leave_end']:
+            start_temp += timedelta(days=1)
+            if check_weekoff(emp_obj.template.weekoff_policy, start_temp, emp_obj):
+                no_of_days_for_leave -= 1
+
+    if balance_setting.sandwich_leave_between_holiday:
+        # employee_leave_cal.no_of_leaves_taken_for_current_period\
+        start_temp = leave_calculation['leave_start']
+        while start_temp < leave_calculation['leave_end']:
+            start_temp += timedelta(days=1)
+            if check_holiday(start_temp, emp_obj):
+                # no_of_days_for_leave+=1
+                pass
+    else:
+        # employee_leave_cal.no_of_leaves_taken_for_current_period\
+        start_temp = leave_calculation['leave_start']
+        while start_temp < leave_calculation['leave_end']:
+            start_temp += timedelta(days=1)
+            if check_holiday(start_temp, emp_obj):
+                no_of_days_for_leave -= 1
+
+    return no_of_days_for_leave
+
+
+def check_for_leave_application(self, employee, **request_data):
+    """
+    This function is used to validate the Leave request by checking for multiple rules available and set in Policy.
+    """
+
+    """
+    Version History:
+
+    Version     Change Detail                                           -   Issue Tracker Number
+    1.0     -   Changes till Date 21-Apr-2021                           -   NA
+    1.1     -   Changes to restrict Hourly Leave based on flag          -   267
+                is_hourly_balance_calculation_required present in
+                BalanceSetting
+    1.2         Fix to show error when Hourly Leave is not allowed      -   772
+                for particular Leave Type
+    1.3     -   Bug Fix for Hourly Leave Raising not allowed if         -   786
+                Half Day is not allowed in policy
+
+
+    """
+
+    print('Request Data received is ', request_data)
+    from core.custom_serializers import LeaveCalculationCustomSerializer
+    print("inside check for leave application")
+    from leave.models import LeaveType, LeavePolicy, EmployeeBalanceReportCalculationNew, LeaveCalculation
+    LEAVE_APPLICATION = 'LeaveCalculation'
+
+    check_date = date.today()
+    start_date = make_aware(datetime(check_date.year, check_date.month, 1))
+    end_date = make_aware(datetime(check_date.year, check_date.month, calendar.mdays[check_date.month]))
+
+    # check for comp off rules
+    try:
+        leave_configuration = employee.template.leave_configuration
+    except:
+        raise ValidationError('Leave settings not configured')
+
+    # Avoind Inter Year Leave Request
+    today = date.today()
+    current_calendar_start = leave_configuration.start_date.replace(year=today.year)
+    current_calendar_end = current_calendar_start + relativedelta(months=12) - timedelta(days=1)
+    leave_request_start_date = request_data['leave_start'].date() if request_data.get('leave_start') else request_data[
+        'half_day_date']
+    if current_calendar_start > leave_request_start_date:
+        raise ValidationError('Past Year Leave Request Not Allowed')
+
+    if request_data['leave_choice'] == FULL_DAY and (
+            request_data['leave_start'].date() < current_calendar_start <= request_data['leave_end'].date() or
+            request_data['leave_start'].date() <= current_calendar_end < request_data['leave_end'].date()
+    ):
+        raise ValidationError('Inter Year Leave Request Not Allowed.')
+
+    error_text = ""
+    data = request_data
+    wop = employee.template.weekoff_policy
+    user_created_leave_type_flag = True
+
+    # total lwp leaves including raise lwp request
+    total_lwp = 0
+    # print("===== lwp data ",data)
+    if data.get("is_lwp") and leave_configuration.limit_lwp:
+        # n_lwp is no. lwp leave apply currently
+        n_lwp = 0
+        if data.get("leave_choice") == FULL_DAY:
+            n_lwp += (data.get("leave_end") - data.get("leave_start")).days + 1
+        else:
+            n_lwp += 0.5
+
+        leave_cals_for_lwp = LeaveCalculation.objects.filter(employee=employee, is_cancelled=False, is_lwp=True,
+                                                             is_cancellation_request=False,
+                                                             process__status__in=['PENDING', 'APPROVED'])
+        for i in leave_cals_for_lwp:
+            if i.leave_choice == FULL_DAY:
+                total_lwp += (i.leave_end - i.leave_start).days + 1
+            else:
+                total_lwp += 0.5
+
+        total_lwp += n_lwp
+        if total_lwp > leave_configuration.number_of_allow_lwp:
+            raise ValidationError('You crossed the allow number of LWP leaves')
+
+    if data.get("is_pl") or data.get("is_compoff") or data.get("is_lwp") or data.get("is_od") or data.get(
+            "is_wfh") or data.get("is_ml") or data.get("leave_choice") == LEAVE_ENCASHMENT:
+        user_created_leave_type_flag = False
+    print("======== user_created_leave_type_flag HY ", user_created_leave_type_flag, data['leave_choice'] != HALF_DAY)
+    balance_setting = None
+    if user_created_leave_type_flag:
+        try:
+            balance_setting = LeavePolicy.objects.get(template=employee.template, leave_type=data['leave_type'],
+                                                      balance_setting__isnull=False, is_active=True).balance_setting
+        except:
+            raise ValidationError('Leave Type Not Applicable or Leave Type settings not configured')
+
+    if balance_setting and not balance_setting.leave_type.is_system:
+        prior_post_week_off = balance_setting.sandwich_leave_between_week_off
+        prior_post_holiday = balance_setting.sandwich_leave_between_holiday
+
+        # Check if sandwich rule is applied and request is not for Half Day or Hourly Leave
+        if (prior_post_week_off or prior_post_holiday) and data['leave_choice'] not in [HALF_DAY, HOURLY_LEAVE]:
+            print("==== inside sandwich policy check", data)
+
+            if data['leave_start']:
+                prior_date = data['leave_start']
+                post_date = data['leave_end']
+
+            elif data["half_day_date"]:
+                prior_date = datetime.combine(data["half_day_date"], time(0, 0, 0))
+                post_date = datetime.combine(data["half_day_date"], time(0, 0, 0))
+
+            one_day = timedelta(days=1)
+            print("prior post ", prior_date, post_date, one_day)
+            is_wop = True
+            for i in range(10):
+                # for prior
+                prior_date = prior_date - one_day
+
+                weekly_off_or_holiday = ''
+                if prior_post_holiday and prior_post_week_off:
+                    weekly_off_or_holiday = "Week off/ Holiday"
+                    flag = check_weekoff(wop, prior_date) or check_holiday(prior_date, employee)
+                elif prior_post_week_off:
+                    weekly_off_or_holiday = "Week off"
+                    flag = check_weekoff(wop, prior_date)
+                elif prior_post_holiday:
+                    weekly_off_or_holiday = "Holiday"
+                    flag = check_holiday(prior_date, employee)
+                else:
+                    flag = True
+                    pass
+
+                print("=== date flag", prior_date, flag)
+                # flag -  1 Its week off,
+                # no need to do validation for Week off
+                if not flag:
+                    if i == 0:
+                        break
+
+                    try:
+                        # checking for full day
+                        leave_cal = LeaveCalculation.objects.get(employee=employee, leave_type=data["leave_type"],
+                                                                 leave_start=prior_date.astimezone(
+                                                                     pytz.timezone("UTC")),
+                                                                 process__status__in=['PENDING', 'APPROVED'],
+                                                                 is_cancelled=False, is_cancellation_request=False)
+                        if leave_cal:
+                            error_text = "Sandwich leave rules applied, please cancel the last leave request before " + weekly_off_or_holiday + " and re-apply for leave."
+                            raise ValidationError(error_text)
+                    except:
+                        print("not full day leave in prior")
+                    break
+
+            for i in range(10):
+                # for post
+                post_date = post_date + one_day
+                weekly_off_or_holiday = ''
+                if prior_post_holiday and prior_post_week_off:
+                    weekly_off_or_holiday = "Week off/ Holiday"
+                    flag = check_weekoff(wop, post_date) or check_holiday(post_date, employee)
+                elif prior_post_week_off:
+                    weekly_off_or_holiday = "Week off"
+                    flag = check_weekoff(wop, post_date)
+                elif prior_post_holiday:
+                    weekly_off_or_holiday = "Holiday"
+                    flag = check_holiday(post_date, employee)
+                else:
+                    flag = True
+                    pass
+
+                print("=== date flag", post_date, flag)
+                if not flag:
+                    if i == 0:
+                        break
+                    try:
+                        # checking for full day
+                        leave_cal = LeaveCalculation.objects.get(employee=employee, leave_type=data["leave_type"],
+                                                                 leave_end=post_date.astimezone(pytz.timezone("UTC")),
+                                                                 process__status__in=['PENDING', 'APPROVED'],
+                                                                 is_cancelled=False, is_cancellation_request=False)
+                        if leave_cal:
+                            error_text = "Sandwich leave rules applied, please cancel the leave request after " + weekly_off_or_holiday + " and re-apply for the leave."
+                            raise ValidationError(error_text)
+                    except:
+                        print("not full day leave in post")
+                    break
+            print("=== error text ", error_text)
+            if error_text:
+                raise ValidationError(error_text)
+
+    is_system_leave_flag = False
+    if balance_setting and balance_setting.leave_type.is_system and balance_setting.leave_type.description == 'Comp Off':
+        is_system_leave_flag = True
+
+    is_paternity_maternity_leave_flag = False
+    if balance_setting and balance_setting.leave_type.is_system and balance_setting.leave_type.description == 'Maternity Leave':
+        is_system_leave_flag = True
+        is_paternity_maternity_leave_flag = True
+        number_of_weeks = 0
+        try:
+            number_of_weeks = balance_setting.no_of_weeks_before_for_maternity + balance_setting.no_of_weeks_after_for_maternity
+            number_of_days_allowed = number_of_weeks * 7
+        except Exception as e:
+            raise ValidationError('Unable to apply for Maternity Leave settings incorrectly configured')
+        no_of_days_per_leave = 0.5
+        if request_data.get('leave_start'):
+            no_of_days_per_leave = request_data['leave_end'] - request_data['leave_start']
+            no_of_days_per_leave = no_of_days_per_leave.days + 1
+
+        if no_of_days_per_leave <= number_of_days_allowed:
+            pass
+        else:
+            raise ValidationError('Applied Days Exceed Number of Weeks Allowed(i.e. ' + str(number_of_weeks) + ' )')
+
+    if balance_setting and balance_setting.leave_type.is_system and balance_setting.leave_type.description == 'Paternity Leave':
+        is_system_leave_flag = True
+        is_paternity_maternity_leave_flag = True
+        number_of_days = balance_setting.no_of_days_for_paternity
+        print("-" * 30, "PL Validation")
+        if request_data['leave_choice'] == FULL_DAY:
+            no_of_days_per_leave = 0.5
+            if request_data.get('leave_start'):
+                no_of_days_per_leave = request_data['leave_end'] - request_data['leave_start']
+                no_of_days_per_leave = no_of_days_per_leave.days + 1
+
+            if no_of_days_per_leave <= number_of_days:
+                pass
+            else:
+                raise ValidationError('Applied Days Exceed Number of Days Allowed(i.e. ' + str(number_of_days) + ' )')
+
+    if request_data['leave_choice'] == LEAVE_ENCASHMENT:
+        from leave.models import LeavePolicy, EmployeeBalanceReportCalculationNew
+        req_data = request_data
+        print("=== req data ", req_data)
+        if req_data.get("leave_choice") == 2:
+            error_text = None
+            if req_data.get("is_pl") or req_data.get("is_compoff") or req_data.get("is_lwp") or req_data.get(
+                    "is_od") or req_data.get("is_wfh") or req_data.get("is_ml"):
+                error_text = "Leave Encashment is not applicable for the system leave type"
+                raise ValidationError("Leave Encashment is not applicable for the system leave")
+            balance_setting = LeavePolicy.objects.get(template=employee.template,
+                                                      leave_type=req_data.get('leave_type')).balance_setting
+            #   print("=== bal sett ",vars(balance_setting))
+            if not balance_setting.allow_balance_encash:
+                error_text = "You are not allow to encash selected leave type"
+                raise ValidationError("You are not allow to encash selected leave")
+            else:
+                all_leave_encashment_processes = Process.objects.filter(sender=employee, request_for="LeaveCalculation",
+                                                                        leave_request__leave_choice=2,
+                                                                        leave_request__leave_type=req_data.get(
+                                                                            'leave_type'),
+                                                                        status__in=['PENDING', 'APPROVED'])
+                total_encashment_days = 0
+                for p in all_leave_encashment_processes:
+                    leave_obj = json.loads(p.request_data)
+                    n = leave_obj.get('leave_encashment_days', 0)
+                    print(n)
+                    total_encashment_days += Decimal(n)
+                total_encashment_days += req_data.get("leave_encashment_days", 0)
+                print("=========== total encase days ", total_encashment_days, balance_setting.max_balance_encash)
+                if total_encashment_days > balance_setting.max_balance_encash:
+                    error_text = "You crossed max leave encashment limit for selected leave"
+                    raise ValidationError("You crossed max leave encashment limit for selected leave")
+
+            try:
+                calendar_start = employee.template.leave_configuration.start_date
+                current_date = req_data['half_day_date']
+                if current_date.month >= calendar_start.month:
+                    calendar_start = calendar_start.replace(year=current_date.year)
+                else:
+                    calendar_start = calendar_start.replace(year=current_date.year - 1)
+                print("=== calendar start ", calendar_start)
+
+                employee_leave_cal = EmployeeBalanceReportCalculationNew.objects.filter(employee=employee,
+                                                                                        leave_type=req_data.get(
+                                                                                            'leave_type'),
+                                                                                        last_accrued_on=calendar_start)
+                print("=== count ", employee_leave_cal.count())
+            except ObjectDoesNotExist:
+                error_text = 'Cannot apply for leave since leave are not accrued/allocated yet'
+                raise ValidationError('Cannot apply for leave since leave are not accrued/allocated yet')
+            except Exception as e:
+                print("== error ", str(e))
+                error_text = 'Leave Calendar Not Configured Correctly'
+                raise ValidationError('Leave Calendar Not Configured Correctly')
+
+            no_of_leave_requests = 0
+            all_leave_requests = Process.objects.filter(sender=employee, request_for=LEAVE_APPLICATION,
+                                                        status__in=[PENDING, APPROVED])
+            print((len(all_leave_requests)))
+
+            for item in all_leave_requests:
+                try:
+                    process_request_data = json.loads(item.request_data)
+                    if process_request_data['leave_type'] == str(req_data.get('leave_type').id):
+                        serializer = LeaveCalculationCustomSerializer(data=process_request_data)
+                        print((serializer.is_valid()))
+                        if serializer.is_valid():
+                            leave_calculation_obj = serializer.validated_data
+                            print("=== leave_calculation_obj", leave_calculation_obj.get("leave_choice"))
+                            leave_choice = leave_calculation_obj.get("leave_choice")
+                            if leave_choice == FULL_DAY and not leave_calculation_obj["is_cancelled"]:
+                                # if leave_calculation_obj.leave_start.month == for_month and
+                                # leave_calculation_obj.leave_start.year == for_year:
+                                no_of_leave_requests += 1
+                            elif leave_choice == HALF_DAY and not leave_calculation_obj["is_cancelled"]:
+                                # if leave_calculation_obj.half_day_date.month == for_month and
+                                # leave_calculation_obj.half_day_date.year == for_year:
+                                no_of_leave_requests += 1
+                            elif leave_choice == LEAVE_ENCASHMENT and not leave_calculation_obj["is_cancelled"]:
+                                no_of_leave_requests += req_data.get("leave_encashment_days")
+
+                            total_opening = 0
+                            total_accrued = 0
+                            total_credited = 0
+                            total_utilized = 0
+                            total_encashed = 0
+                            total_adjusted = 0
+                            total_adjusted_accrued = 0
+                            no_of_days_for_leave = req_data.get("leave_encashment_days")
+                            for i in employee_leave_cal:
+                                total_opening += i.opening
+
+                                # Set Default for month comparison date as Current Date
+                                for_month_compare_date = datetime.today().date()
+                                if balance_setting:
+                                    if balance_setting.consider_future_accrual_for_validation:
+
+                                        # If Balance setting says consider Future Accrued Leaves for Validation then,
+                                        # Set for month comparison date as Leave Start Date or Half Day Date.
+                                        if leave_choice == FULL_DAY and not leave_calculation_obj["is_cancelled"]:
+                                            for_month_compare_date = leave_calculation_obj['leave_start'].date()
+
+                                        elif leave_choice in [HALF_DAY, HOURLY_LEAVE] and \
+                                                not leave_calculation_obj["is_cancelled"]:
+                                            for_month_compare_date = leave_calculation_obj['half_day_date']
+
+                                # Increase Total Accrued only if for month date of EmployeeBalanceReportCalculationNew
+                                # is less then the for month compare date.
+                                if i.for_month <= for_month_compare_date:
+                                    total_accrued += i.accrued
+
+                                total_credited += i.credited
+                                total_utilized += i.utilized
+                                total_encashed += i.encashed
+                                total_adjusted += i.adjusted
+                                total_adjusted_accrued += i.adjusted_accrued
+                            print("=== opening, accrual,credit ", total_opening, total_accrued, total_credited)
+                            max_leaves_for_current_period = total_opening + total_accrued + total_credited + total_adjusted_accrued
+                            print("=== taken leave ", max_leaves_for_current_period)
+                            balance_leaves = max_leaves_for_current_period - total_utilized - total_adjusted - no_of_days_for_leave - total_encashed
+                            print("=== rem bal ", balance_leaves)
+                            if balance_leaves >= 0:
+                                return
+                            else:
+                                error_text = "Not sufficient balance"
+                                raise ValidationError("Not sufficient balance")
+
+                except Exception as e:
+                    print("=== str ", str(e))
+                    raise ValidationError(error_text)
+
+    # Check if leave Start is before leave end
+    if request_data['leave_choice'] == FULL_DAY:
+        if request_data['leave_end'] < request_data['leave_start']:
+            print("leave end less")
+            raise ValidationError('Leave end date cannot be less than start date')
+
+    # If request is for Hourly Leave then, check if applied time falls within the shift,
+    # also check its not on holiday or weekly off
+    # 1 - Credit and 0 - Debit (Default)
+    if 'leave_subtype' in request_data and request_data['leave_subtype'] == 1:
+        pass
+
+    elif (request_data['leave_choice'] == HOURLY_LEAVE or request_data[
+        'leave_choice'] == HALF_DAY) and user_created_leave_type_flag:
+        if balance_setting and not balance_setting.allow_leave_on_holiday_or_weekly_off and (
+                not is_system_leave_flag or is_paternity_maternity_leave_flag):
+            is_holiday = check_holiday(request_data['half_day_date'], employee)
+            if is_holiday:
+                print('Leave not allowed on holiday')
+                raise ValidationError('Can not apply Leave for Holiday')
+
+            is_week_off = check_roster_weekoff(employee, request_data['half_day_date'])
+            if is_week_off:
+                print('Leave not allowed on Week off')
+                raise ValidationError('Can not apply Leave for Weekly Off')
+
+        if request_data['leave_choice'] == HOURLY_LEAVE:
+            if balance_setting:
+                if not balance_setting.is_hourly_balance_calculation_required:
+                    raise ValidationError('Hourly Leave Application not allowed for selected leave type.')
+            else:
+                print('############################ Balance setting not found so the error you see.')
+                raise ValidationError('You are not allowed to apply for this leave type.')
+
+        # Get object of ShiftSetting model to check if applied leave falls within shift time.
+        shift_setting_object = get_roster_shift(employee, request_data['half_day_date'])
+        if shift_setting_object and request_data['leave_choice'] == HOURLY_LEAVE:
+            if shift_setting_object.start_time and shift_setting_object.end_time:
+                applied_leave_start_time = request_data['leave_start']
+                applied_leave_end_time = request_data['leave_end']
+
+                # Get Shift Start Time and End Time combined with Date
+                start_time, end_time = get_shift_start_and_end_time(shift_setting_object,
+                                                                    request_data['leave_start'].date())
+
+                print('Shift Start Time ', start_time, ' Shift End Time ', end_time)
+                print('Applied ', applied_leave_start_time, ' Shift End Time ', applied_leave_end_time)
+
+                # Check if Balance Setting of Leave says to restrict Leave withing Shift Time then,
+                # Check if Applied Leave Start Time or End Time Falls before or after Shift Start or End Time.
+                # If it falls then, raise a Error to restrict Applying to Within Shift Start/ End Time.
+                if balance_setting.restrict_hourly_leave_within_shift_time:
+                    if applied_leave_start_time < start_time or applied_leave_start_time > end_time or \
+                            applied_leave_end_time < start_time or applied_leave_end_time > end_time:
+                        print('Out of the box leave')
+                        raise ValidationError('Leave applied out of Shift Working Hours')
+
+    payroll_lock = ClientInfo.objects.get(client__schema_name=connection.get_schema().encode('utf8'))
+    payroll_lock_date = payroll_lock.payroll_lock_date
+    print(("payroll datte", type(payroll_lock_date)))
+    # print("Leave Start ", type(request_data['leave_start'].date()))
+    payroll_lock_status = payroll_lock.payroll_lock_status
+
+    if payroll_lock_status:
+        if request_data['leave_choice'] == FULL_DAY:
+            if payroll_lock_date > request_data['leave_start'].date():
+                raise ValidationError(error_messages[1051])
+
+        elif request_data['leave_choice'] == HALF_DAY or request_data['leave_choice'] == HOURLY_LEAVE:
+            if payroll_lock_date > request_data['half_day_date']:
+                raise ValidationError(error_messages[1051])
+    else:
+        pass
+
+    # check for compoff
+    # check for ml
+    if request_data.get("is_compoff", False):
+        return
+
+    # Check for LWP
+    if request_data.get("is_lwp", False):
+        return
+
+    # Check for OD/FV
+    if request_data.get("is_od", False):
+        return
+    # Check for WFH
+    print(request_data)
+    if request_data.get("is_wfh", False):
+        return
+
+    if 'leave_subtype' in request_data:
+        if request_data['leave_subtype'] == 1:
+            # credit leaves no check
+            print("Credit Leaves no check")
+            return
+
+    # Check for Leave Restriction
+    if balance_setting.request_restriction:
+        # get Applied Date
+        if request_data['leave_choice'] == FULL_DAY:
+            applied_date = request_data['leave_start'].date()
+        else:
+            applied_date = request_data['half_day_date']
+
+        # print("== type of applied date ",type(applied_date))
+        # GET CURRENT DATE
+        no_of_days_allowed = balance_setting.limit_request
+        no_of_advance_days_allowed = balance_setting.minimum_days_notice
+        todays_date = date.today()
+        if todays_date >= applied_date:
+            # print("== back ",no_of_days_allowed)
+            if (todays_date - applied_date).days > no_of_days_allowed:
+                # CHECK FAILED RAISING ERROR
+                raise ValidationError(error_messages[1042])
+
+            else:
+                #   print "check for restriction passed"
+                pass
+        else:
+            # print("==  advance",no_of_advance_days_allowed)
+            last_date_to_apply_for_leave = todays_date + timedelta(days=no_of_advance_days_allowed)
+            if last_date_to_apply_for_leave >= applied_date and no_of_advance_days_allowed != 0:
+                # CHECK FAILED RAISING ERROR
+                raise ValidationError(error_messages[1054])
+
+            else:
+                print("check for restriction passed")
+                pass
+
+    # Check for saturday OFF leave
+    if balance_setting:
+        if balance_setting.leave_type.description == 'Saturday Off':
+            if request_data['leave_choice'] == FULL_DAY:
+                applied_date = request_data['leave_start'].date()
+            else:
+                applied_date = request_data['half_day_date']
+            print(("DAY ", applied_date.weekday()))
+            if applied_date.weekday() != 5:
+                raise ValidationError(error_messages[1056])
+
+    # GET Month & Year from applied leave
+    if request_data['leave_choice'] == FULL_DAY:
+        for_month = request_data['leave_start'].month
+        for_year = request_data['leave_start'].year
+    elif request_data['leave_choice'] == HALF_DAY or request_data['leave_choice'] == HOURLY_LEAVE:
+        for_month = request_data['half_day_date'].month
+        for_year = request_data['half_day_date'].year
+    else:
+        pass
+
+    no_of_leave_requests = 0
+
+    all_leave_requests = Process.objects.filter(sender=employee, request_for=LEAVE_APPLICATION,
+                                                status__in=[PENDING, APPROVED])
+    print((len(all_leave_requests)))
+
+    for item in all_leave_requests:
+        try:
+            process_request_data = json.loads(item.request_data)
+            if process_request_data['leave_type'] == str(request_data['leave_type'].id):
+                serializer = LeaveCalculationCustomSerializer(data=process_request_data)
+                serializer.is_valid()
+                print((serializer.is_valid()))
+                if serializer.is_valid():
+                    leave_calculation_obj = LeaveCalculation(**serializer.validated_data)
+                    if (leave_calculation_obj.leave_choice == FULL_DAY) and not leave_calculation_obj.is_cancelled:
+                        if leave_calculation_obj.leave_start.month == for_month and leave_calculation_obj.leave_start.year == for_year:
+                            no_of_leave_requests += 1
+
+                    elif (
+                            leave_calculation_obj.leave_choice == HALF_DAY or leave_calculation_obj.leave_choice == HOURLY_LEAVE) and not leave_calculation_obj.is_cancelled:
+                        if leave_calculation_obj.half_day_date.month == for_month and leave_calculation_obj.half_day_date.year == for_year:
+                            no_of_leave_requests += 1
+
+        except Exception as e:
+            print((str(e)))
+            continue
+
+    print("Max request allowed is ", balance_setting.max_days_per_month)
+    print("no of leave request ", no_of_leave_requests)
+
+    print("inside leave application check")
+    if balance_setting.max_days_per_month > no_of_leave_requests and (
+            not is_system_leave_flag or is_paternity_maternity_leave_flag):
+        print("HEREEERRREEE")
+        if request_data['leave_choice'] == FULL_DAY:
+            print("check1")
+            print((request_data['leave_end']))
+
+            try:
+                calendar_start = employee.template.leave_configuration.start_date
+                # Replace Calendar year To current Year
+                current_date = request_data['leave_start'].date()
+                if current_date.month >= calendar_start.month:
+                    calendar_start = calendar_start.replace(year=current_date.year)
+                else:
+                    calendar_start = calendar_start.replace(year=current_date.year - 1)
+
+                calendar_end = calendar_start + relativedelta(years=1) - timedelta(days=1)
+
+                print(calendar_start)
+                employee_leave_cal = EmployeeBalanceReportCalculationNew.objects.filter(
+                    employee=employee, leave_type=request_data['leave_type'], last_accrued_on=calendar_start)
+
+                print(calendar_start)
+
+            except ObjectDoesNotExist:
+                if not is_system_leave_flag:
+                    raise ValidationError('Cannot apply for leave since leave are not accrued/allocated yet.')
+            except:
+                raise ValidationError('Leave Calendar Not Configured Correctly')
+
+            no_of_days_for_leave = count_leaves_sandwich(request_data, employee, balance_setting)
+
+            # Validation for min day leave request like if min_day_per_leave is 3
+            # then number of day for which leave request raised should be greater than 3.
+            if no_of_days_for_leave < balance_setting.min_day_per_leave and (
+                    not is_system_leave_flag or is_paternity_maternity_leave_flag):
+                raise ValidationError('Kindly select no of days greater than ' + str(balance_setting.min_day_per_leave))
+            elif balance_setting.max_days_per_leave_request >= no_of_days_for_leave and (
+                    not is_system_leave_flag or is_paternity_maternity_leave_flag):
+                print('below maximum so should be fare leaves')
+            print("Max Day Validation -----> ", is_system_leave_flag, is_paternity_maternity_leave_flag,
+                  balance_setting.max_days_per_leave_request, no_of_days_for_leave,
+                  balance_setting.max_days_per_leave_request >= no_of_days_for_leave)
+            if (
+                    not is_system_leave_flag or is_paternity_maternity_leave_flag) and balance_setting.max_days_per_leave_request >= no_of_days_for_leave:
+                total_opening = 0
+                total_accrued = 0
+                total_credited = 0
+                total_utilized = 0
+                total_encashed = 0
+                total_adjusted = 0
+                total_adjusted_accrued = 0
+                total_lapsed = 0
+                total_adjusted_lapsed = 0
+
+                for i in employee_leave_cal:
+                    total_opening += i.opening
+                    total_accrued += i.accrued
+                    total_credited += i.credited
+                    total_utilized += i.utilized
+                    total_encashed += i.encashed
+                    total_adjusted += i.adjusted
+                    total_adjusted_accrued += i.adjusted_accrued
+                    if for_month != i.for_month.month and for_year != i.for_month.year:
+                        total_lapsed += i.lapsed
+                        total_adjusted_lapsed += i.adjusted_lapsed
+
+                max_leaves_for_current_period = total_opening + total_accrued + total_credited + total_adjusted_accrued
+                balance_leaves = max_leaves_for_current_period - total_utilized - total_adjusted - no_of_days_for_leave - total_encashed - total_adjusted_lapsed - total_lapsed
+                print((balance_leaves, "BALANCE"))
+                print("=== opening, accrual,credit 2 ", total_opening, total_accrued, total_credited)
+                max_leaves_for_current_period = total_opening + total_accrued + total_credited
+                print("=== taken leave 2 ", max_leaves_for_current_period)
+                if balance_leaves >= 0:
+                    # all checks cleared
+                    pass
+                else:
+                    if balance_setting.allow_negative_balance:
+                        # Check for negative entitlement calculation
+                        if balance_setting.max_leaves_allowed_in_negative_balance_period == CUSTOM_ENTITLEMENT:
+                            max_negative_leaves = balance_setting.max_leaves_allowed_in_negative_balance_days
+                            print("max negative leaves")
+
+                        else:
+                            # annual/half year/quarter/monthly entitlement
+                            if employee.employee_type == TRAINEE:
+                                total_no_of_leaves = balance_setting.trainee_employee_no_of_days
+
+                            elif employee.employee_type == PROBATIONER:
+                                total_no_of_leaves = balance_setting.probationer_employee_no_of_days
+
+                            elif employee.employee_type == CONFIRMED:
+                                total_no_of_leaves = balance_setting.confirmed_employee_no_of_days
+
+                            else:
+                                raise ValidationError('Employee Type not configured')
+
+                            # less already taken leaves from max leaves allowed in a year
+                            max_negative_leaves_balance = Decimal(total_no_of_leaves)
+                            max_negative_leaves = max_negative_leaves_balance / Decimal(
+                                balance_setting.max_leaves_allowed_in_negative_balance_period)
+
+                        if abs(max_negative_leaves) >= abs(balance_leaves):
+                            # Can apply for leave
+                            pass
+                        else:
+                            if not is_system_leave_flag:
+                                raise ValidationError('Max negative balance exceeded')
+                    else:
+                        if not is_system_leave_flag:
+                            raise ValidationError('Not sufficient balance. Negative balance not allowed.')
+
+            else:
+                if not is_system_leave_flag or is_paternity_maternity_leave_flag:
+                    raise ValidationError('Max Days per leave request crossed')
+
+        elif request_data['leave_choice'] == HALF_DAY or request_data['leave_choice'] == HOURLY_LEAVE:
+            # Check if Half day allowed
+            if balance_setting.min_day_for_leave_app == 1 and request_data['leave_choice'] == HALF_DAY:
+                raise ValidationError('Half day leave not allowed')
+            try:
+
+                calendar_start = employee.template.leave_configuration.start_date
+
+                # Replace Calendar year To current Year
+                current_date = request_data['half_day_date']
+                if current_date.month >= calendar_start.month:
+                    calendar_start = calendar_start.replace(year=current_date.year)
+                else:
+                    calendar_start = calendar_start.replace(year=current_date.year - 1)
+
+                calendar_end = calendar_start + relativedelta(years=1) - timedelta(days=1)
+
+                print(calendar_start)
+                employee_leave_cal = EmployeeBalanceReportCalculationNew.objects.filter(
+                    employee=employee, leave_type=request_data['leave_type'], last_accrued_on=calendar_start).first()
+                print(calendar_start)
+
+            except ObjectDoesNotExist:
+                if not is_system_leave_flag:
+                    raise ValidationError('Cannot apply for leave since leave are not accrued/allocated yet.')
+            except Exception as e:
+                print((str(e)))
+                raise ValidationError('Leave Calendar Not Configured Correctly')
+
+            # if calendar_end < request_data['half_day_date']:
+            #     raise ValidationError('Cannot apply for leave for next leave calendar')
+
+            employee_leave_cal = EmployeeBalanceReportCalculationNew.objects.filter(
+                employee=employee, leave_type=request_data['leave_type'], last_accrued_on=calendar_start)
+            no_of_days_for_leave = Decimal(0.5)
+
+            if request_data['leave_choice'] == HOURLY_LEAVE:
+                from core.signals import count_leaves_request
+                from core.common_utils import get_number_of_working_hours_in_a_day
+                leave_calculation = LeaveCalculation(employee=employee, leave_type=request_data['leave_type'],
+                                                     half_day_date=current_date,
+                                                     leave_start=request_data['leave_start'],
+                                                     leave_end=request_data['leave_end'], leave_choice=HOURLY_LEAVE)
+                no_of_days_for_leave = count_leaves_request(leave_calculation, leave_calculation.employee, True)
+                number_of_hours_for_working_shift = Decimal(
+                    get_number_of_working_hours_in_a_day(employee).total_seconds() / 60 / 60)
+                no_of_days_for_leave = no_of_days_for_leave / number_of_hours_for_working_shift
+
+            if (
+                    not is_system_leave_flag or is_paternity_maternity_leave_flag) and balance_setting.max_days_per_leave_request >= no_of_days_for_leave:
+                '''
+                if !(balance_setting.min_day_for_leave_app == ONE_DAY and request_data['min_day_for_leave_app'] == HALF_DAY):
+                    print "half day check cleared"
+                else:
+                    raise ValidationError('half day leave app not allowed')
+
+                '''
+                total_opening = 0
+                total_accrued = 0
+                total_credited = 0
+                total_utilized = 0
+                total_encashed = 0
+                total_adjusted = 0
+                total_adjusted_accrued = 0
+
+                for i in employee_leave_cal:
+                    total_opening += i.opening
+                    total_accrued += i.accrued
+                    total_credited += i.credited
+                    total_utilized += i.utilized
+                    total_encashed += i.encashed
+                    total_adjusted += i.adjusted
+                    total_adjusted_accrued += i.adjusted_accrued
+
+                print(total_opening)
+                print(total_accrued)
+                print(employee_leave_cal)
+                max_leaves_for_current_period = total_opening + total_accrued + total_credited + total_adjusted_accrued
+                balance_leaves = max_leaves_for_current_period - total_utilized - total_adjusted - no_of_days_for_leave - total_encashed
+                print((balance_leaves, "BALANCE"))
+                print("=== opening, accrual,credit 2 ", total_opening, total_accrued, total_credited)
+                max_leaves_for_current_period = total_opening + total_accrued + total_credited
+                print("=== taken leave 2 ", max_leaves_for_current_period)
+                if balance_leaves >= 0:
+                    # all checks cleared
+                    pass
+                else:
+                    if balance_setting.allow_negative_balance:
+                        if employee.employee_type == TRAINEE:
+                            total_no_of_leaves = balance_setting.trainee_employee_no_of_days
+
+                        elif employee.employee_type == PROBATIONER:
+                            total_no_of_leaves = balance_setting.probationer_employee_no_of_days
+
+                        elif employee.employee_type == CONFIRMED:
+                            total_no_of_leaves = balance_setting.confirmed_employee_no_of_days
+
+                        else:
+                            raise ValidationError('Employee Type not configured')
+
+                        # less already taken leaves from max leaves allowed in a year
+                        max_negative_leaves_balance = Decimal(total_no_of_leaves)
+
+                        # Check for negative entitlement calculation
+                        if balance_setting.max_leaves_allowed_in_negative_balance_period == 0:
+                            max_negative_leaves = balance_setting.max_leaves_allowed_in_negative_balance_days
+                            print("max negative leaves")
+
+                        else:
+                            # annual/half year/quarter/monthly entitlement
+                            max_negative_leaves = max_negative_leaves_balance / Decimal(
+                                balance_setting.max_leaves_allowed_in_negative_balance_period)
+
+                        print(max_negative_leaves)
+                        print(max_negative_leaves_balance)
+                        print(balance_leaves)
+                        if abs(max_negative_leaves) >= abs(balance_leaves):
+                            # Can apply for leave
+                            pass
+                        else:
+                            if not is_system_leave_flag:
+                                raise ValidationError('Max negative balance exceeded')
+                    else:
+                        if not is_system_leave_flag:
+                            raise ValidationError('Not sufficient balance. Negative balance not allowed')
+
+            else:
+                if not is_system_leave_flag or is_paternity_maternity_leave_flag:
+                    raise ValidationError('Max Days per leave request crossed')
+
+        else:
+            pass
+
+    else:
+        print("max request reach")
+        if not is_system_leave_flag or is_paternity_maternity_leave_flag:
+            raise ValidationError('Max Requests for this month reached')
+
+
+ATTENDANCE_REGULARIZE = 'AttendanceCalculation'
+ATTENDANCE_CANCELLATION = 'AttendanceCancellation'
+LEAVE_APPLICATION = 'LeaveCalculation'
+LEAVE_CANCELLATION = 'LeaveCancellation'
+EXPENSE_REQUEST_BUSINESS = 'BusinessExpense'
+EXPENSE_REQUEST_FLEXI = 'FlexiExpense'
+EXPENSE_REQUEST_TRAVEL = 'TravelExpense'
+EXPENSE_REQUEST_TRIP = 'TripExpense'
+EXPENSE_REQUEST_BUSINESS_CANCELLATION = 'BusinessExpenseCancellation'
+EXPENSE_REQUEST_FLEXI_CANCELLATION = 'FlexiExpenseCancellation'
+EXPENSE_REQUEST_TRAVEL_CANCELLATION = 'TravelExpenseCancellation'
+EXPENSE_REQUEST_TRIP_CANCELLATION = 'TripExpenseCancellation'
+ESS_CHANGE_REQUEST_PI = 'PersonalInformation'
+ESS_CHANGE_REQUEST_FI = 'FamilyInformation'
+ESS_CHANGE_REQUEST_AD = 'AcademicDetail'
+ESS_CHANGE_REQUEST_VI = 'VisaInformation'
+ESS_CHANGE_REQUEST_MH = 'MedicalHistory'
+ESS_CHANGE_REQUEST_VD = 'VehicleDetail'
+ESS_CHANGE_REQUEST_EX = 'Experience'
+ESS_CHANGE_REQUEST_AS = 'Asset'
+ESS_CHANGE_REQUEST_BI = 'BankInformation'
+ESS_CHANGE_REQUEST_SK = 'Skill'
+ESS_CHANGE_REQUEST_UD = 'UserDocuments'
+ESS_CANCELLED = 'ESSCancelled'
+EXPENSE_REQUEST_TRIP_TRAVEL = 'TripTravelExpense'
+EXPENSE_REQUEST_TRIP_ACCOMMODATION = 'TripAccommodationExpense'
+EXPENSE_REQUEST_TRIP_OTHER = 'TripOtherExpense'
+EXPENSE_REQUEST_TRIP_ADVANCE = 'TripAdvanceExpense'
+TIMESHEET = 'Timesheet'
+
+REQUEST_FOR_CHOICES = (
+    (ATTENDANCE_REGULARIZE, 'Regularize Request'),
+    (LEAVE_APPLICATION, 'Application For leave'),
+    (EXPENSE_REQUEST_BUSINESS, 'Business Expense Request'),
+    (EXPENSE_REQUEST_FLEXI, 'Flexi Expense Request'),
+    (EXPENSE_REQUEST_TRAVEL, 'Travel Expense Request'),
+    (EXPENSE_REQUEST_TRIP, 'Trip Expense Request'),
+    (EXPENSE_REQUEST_TRIP_TRAVEL, 'Trip Travel Expense Request'),
+    (EXPENSE_REQUEST_TRIP_ACCOMMODATION, 'Trip Accommodation Expense Request'),
+    (EXPENSE_REQUEST_TRIP_OTHER, 'Trip Other Expense Request'),
+    (EXPENSE_REQUEST_TRIP_ADVANCE, 'Trip Advance Expense Request'),
+    (LEAVE_CANCELLATION, 'Leave Cancellation Request'),
+    (ESS_CHANGE_REQUEST_PI, 'PersonalInformation Change Request'),
+    (ESS_CHANGE_REQUEST_MH, 'MedicalHistory Change Request'),
+    (ESS_CHANGE_REQUEST_VD, 'VehicleDetail Change Request'),
+    (ESS_CHANGE_REQUEST_EX, 'Experience Change Request'),
+    (ESS_CHANGE_REQUEST_AS, 'Asset Change Request'),
+    (ESS_CHANGE_REQUEST_BI, 'BankInformation Change Request'),
+    (ESS_CHANGE_REQUEST_SK, 'Skill Change Request'),
+    (ESS_CHANGE_REQUEST_UD, 'UserDocuments Change Request'),
+    (TIMESHEET, 'Timesheet Approval Request'),
+)
+
+
+class Process(ValidateOnSaveMixin, models.Model):
+    """
+    This model is used to store Approval details for below Approval Requests:
+
+    Attendance Regularisation
+    Leave Application
+    Leave Cancellation
+    Business Expense
+    Local Travel Expense
+    Flexi Expense
+    Trip Expense
+    Timesheet Approval
+
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sender = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    request_for = models.CharField(max_length=100, choices=REQUEST_FOR_CHOICES, db_index=True)
+    request_data = models.TextField(null=True, blank=True)
+    previous_data = models.TextField(null=True, blank=True)
+    request_supporting_document = models.FileField(upload_to=request_supporting_file_name, null=True, max_length=255,
+                                                   blank=True, storage=PrivateMediaStorage())
+    status = models.CharField(default=STARTED, choices=STATUS_CHOICES, max_length=30, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+    finished = models.DateTimeField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    no_of_child_workflows = models.IntegerField(null=True, blank=True)
+    comment = models.CharField(max_length=200, blank=True, null=True)
+    workflow_definition = models.ForeignKey(WorkflowDefinition, on_delete=models.PROTECT, null=True, blank=True)
+    combination_workflow_definition = models.ForeignKey(WorkflowDefinition, on_delete=models.PROTECT,
+                                                        related_name='combination_workflow_definition', null=True,
+                                                        blank=True)
+    is_cancelled = models.BooleanField(default=False)
+    is_proxy = models.BooleanField(default=False)
+    proxy_by = models.ForeignKey(Employee, on_delete=models.PROTECT, null=True, blank=True, related_name='proxy_by')
+    approval_date = models.DateTimeField(null=True, blank=True)
+
+    def clean(self):
+        print(self.status)
+        print(self.request_data)
+        print("inside process ka clean")
+        employee = self.sender
+
+        try:
+            json.loads(self.request_data)
+
+        except ObjectDoesNotExist:
+            pass
+
+        except ValueError as e:
+            print(str(e))
+            raise ValidationError(error_messages[1016])
+
+        except Exception as e:
+            print(str(e))
+            raise ValidationError(error_messages[1016])
+
+        request_data = dict(json.loads(self.request_data))
+
+        if self.request_for == ATTENDANCE_REGULARIZE:
+
+            if self.status == STARTED:
+                from core.custom_serializers import AttendanceCalculationCustomSerializer
+                from attendance.models import AttendanceCalculation
+                from leave.models import LeaveCalculation, DEBIT
+
+                # Validation of data is not required in case request of regularisation is for ON CALL DUTIES
+                if 'call_out_status' not in request_data:
+                    serializer = AttendanceCalculationCustomSerializer(data=request_data)
+                    serializer.is_valid(raise_exception=True)
+
+                    # CHECK FOR x days Restriction
+
+                    if self.sender:
+                        if self.sender.template:
+                            if self.sender.template.attendance_policy:
+                                leaves_deducted = LeaveCalculation.objects.filter(
+                                    employee=self.sender, is_cancellation_request=False, is_cancelled=False,
+                                    process__status__in=['PENDING', 'APPROVED'], leave_subtype=DEBIT,
+                                    leave_choice__in=[FULL_DAY, HALF_DAY], process__is_active=True
+                                ).exclude(process__is_cancelled=True).filter(
+                                    Q(leave_end__gte=serializer.validated_data['applicable_date'],
+                                      leave_start__lte=serializer.validated_data['applicable_date']) |
+                                    Q(half_day_date=serializer.validated_data['applicable_date'])
+                                ).order_by('-process__created_at').aggregate(
+                                    leaves_deducted=Coalesce(Sum('leaves_deducted'), 0))['leaves_deducted']
+                                if leaves_deducted >= 1:
+                                    raise ValidationError(error_messages[1076])
+
+                                if self.sender.template.attendance_policy.allow_reg:
+                                    # restriction enabled
+                                    # get todays date and applied for date
+                                    if self.is_proxy and self.sender.template.attendance_policy.bypass_regularization_restrictions_when_proxy:
+                                        pass
+                                    else:
+                                        no_of_days_allowed = self.sender.template.attendance_policy.reg_limit
+                                        todays_date = date.today()
+                                        if todays_date >= serializer.validated_data['applicable_date']:
+                                            if (todays_date - serializer.validated_data[
+                                                'applicable_date']).days > no_of_days_allowed:
+
+                                                # CHECK FAILED RAISING ERROR
+                                                raise ValidationError(error_messages[1040])
+
+                                            else:
+                                                print("check for restriction passed")
+                                                pass
+                                        else:
+                                            pass
+
+                                        # Check Number of Request Allowed
+                                        no_of_req_allowed = self.sender.template.attendance_policy.reg_limit_number
+                                        for_month = serializer.validated_data['applicable_date'].month
+                                        for_year = serializer.validated_data['applicable_date'].year
+                                        no_of_past_requests = 0
+                                        all_past_requests = Process.objects.filter(sender=employee,
+                                                                                   request_for=ATTENDANCE_REGULARIZE,
+                                                                                   status__in=[PENDING, APPROVED])
+                                        for item in all_past_requests:
+                                            try:
+                                                process_request_data = json.loads(item.request_data)
+                                                serializer = AttendanceCalculationCustomSerializer(
+                                                    data=process_request_data)
+                                                serializer.is_valid()
+                                                if serializer.is_valid():
+                                                    print((serializer.validated_data['applicable_date'].year, for_year))
+                                                    print(
+                                                        (serializer.validated_data['applicable_date'].month, for_month))
+
+                                                    if serializer.validated_data[
+                                                        'applicable_date'].month == for_month and \
+                                                            serializer.validated_data[
+                                                                'applicable_date'].year == for_year:
+                                                        no_of_past_requests += 1
+                                            except Exception as e:
+                                                print((str(e)))
+                                                continue
+                                        if no_of_req_allowed <= no_of_past_requests:
+                                            raise ValidationError(error_messages[1046])
+                                        else:
+                                            print("check for restriction passed")
+                                            pass
+
+                                else:
+                                    print("check for restriction disabled")
+
+                                # check if payroll lcok then show error
+                                payroll_lock = ClientInfo.objects.get(
+                                    client__schema_name=connection.get_schema().encode('utf8'))
+                                payroll_lock_date = payroll_lock.payroll_lock_date
+                                payroll_lock_status = payroll_lock.payroll_lock_status
+                                if payroll_lock_status:
+                                    if payroll_lock_date > serializer.validated_data['applicable_date']:
+                                        raise ValidationError(error_messages[1051])
+
+                    try:
+                        attendance_cal = AttendanceCalculation.objects.get(employee__id=request_data['employee'],
+                                                                           applicable_date=request_data[
+                                                                               'applicable_date'])
+                        attendance_cal.regularize = True
+                        attendance_cal.save()
+                        print("clean try block")
+                        previous_data = dict({})
+                        if attendance_cal.first_in_time:
+                            previous_data['first_in_time'] = str(attendance_cal.first_in_time.date()) + "T" + str(
+                                attendance_cal.first_in_time.time()) + "Z"
+
+                        if attendance_cal.last_out_time:
+                            previous_data['last_out_time'] = str(attendance_cal.last_out_time.date()) + "T" + str(
+                                attendance_cal.last_out_time.time()) + "Z"
+                        previous_data['status'] = attendance_cal.status
+
+                        self.previous_data = json.dumps(previous_data)
+
+                    except Exception as e:
+                        # raise ValidationError(error_messages[1017])
+                        print(("ERROR IN CHECK", str(e)))
+                        pass
+
+            elif self.status == APPROVED or self.status == CANCELLED:
+                pass
+
+        elif (self.request_for == LEAVE_APPLICATION):
+            from core.custom_serializers import LeaveCalculationCustomSerializer
+            print('Received row data is ', request_data)
+            serializer = LeaveCalculationCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+            request_data = serializer.validated_data
+            print('Passing validated data ', request_data)
+            if ((self.status == STARTED)):
+                check_for_leave_application(employee, **request_data)
+            else:
+                pass
+
+        elif (self.request_for == LEAVE_CANCELLATION):
+
+            from core.custom_serializers import LeaveCalculationCustomSerializer
+            serializer = LeaveCalculationCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == EXPENSE_REQUEST_BUSINESS):
+            from core.custom_serializers import BusinessExpenseCustomSerializer
+            serializer = BusinessExpenseCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+            # CHECK FOR x days Restriction
+
+            if self.sender:
+                if self.sender.template:
+                    if self.sender.template.expense_policy:
+                        if self.sender.template.expense_policy.allow_req:
+                            # restriction enabled
+                            # get todays date and applied for date
+
+                            no_of_days_allowed = self.sender.template.expense_policy.req_limit
+                            todays_date = date.today()
+                            if todays_date >= serializer.validated_data['transaction_date']:
+                                if (todays_date - serializer.validated_data[
+                                    'transaction_date']).days > no_of_days_allowed:
+
+                                    # CHECK FAILED RAISING ERROR
+                                    raise ValidationError(error_messages[1041])
+
+                                else:
+                                    print("check for restriction passed")
+                                    pass
+                            else:
+
+                                pass
+                        else:
+                            print("check for restriction disabled")
+
+                        # CHECK FOR Project Restriction
+                        # Check if there is a project
+                        if 'project' in serializer.validated_data:
+                            if serializer.validated_data['project']:
+                                # get object and check for restriction
+
+                                if serializer.validated_data['project'].restrict:
+                                    # Check for Amount
+                                    print("Restriction enabled")
+                                    amount = 0
+                                    amount = serializer.validated_data['project'].businessexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    amount += serializer.validated_data['project'].tripexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('total_amount'), 0))['amount']
+                                    amount += serializer.validated_data['project'].travelexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    print(amount)
+                                    print((serializer.validated_data['project'].amount))
+                                    print((serializer.validated_data['amount']))
+                                    if serializer.validated_data['project'].amount < (
+                                            amount + serializer.validated_data['amount']):
+                                        # overshoot
+                                        raise ValidationError(error_messages[1045])
+                                    else:
+                                        print("passed")
+
+                                else:
+                                    print("No Restriction")
+
+        elif (self.request_for == EXPENSE_REQUEST_FLEXI):
+            from core.custom_serializers import FlexiExpenseCustomSerializer
+            serializer = FlexiExpenseCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+            # CHECK FOR x days Restriction
+
+            if self.sender:
+                if self.sender.template:
+                    if self.sender.template.expense_policy:
+                        if self.sender.template.expense_policy.allow_req:
+                            # restriction enabled
+                            # get todays date and applied for date
+
+                            no_of_days_allowed = self.sender.template.expense_policy.req_limit
+                            todays_date = date.today()
+                            if todays_date >= serializer.validated_data['transaction_date']:
+                                if (todays_date - serializer.validated_data[
+                                    'transaction_date']).days > no_of_days_allowed:
+
+                                    # CHECK FAILED RAISING ERROR
+                                    raise ValidationError(error_messages[1041])
+
+                                else:
+                                    print("check for restriction passed")
+                                    pass
+                            else:
+
+                                pass
+                        else:
+                            print("check for restriction disabled")
+
+                        # CHECK FOR Project Restriction
+                        # Check if there is a project
+                        if 'project' in serializer.validated_data:
+                            if serializer.validated_data['project']:
+                                # get object and check for restriction
+
+                                if serializer.validated_data['project'].restrict:
+                                    # Check for Amount
+                                    print("Restriction enabled")
+                                    amount = 0
+                                    amount = serializer.validated_data['project'].businessexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    amount += serializer.validated_data['project'].tripexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('total_amount'), 0))['amount']
+                                    amount += serializer.validated_data['project'].travelexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    print(amount)
+                                    print((serializer.validated_data['project'].amount))
+                                    print((serializer.validated_data['amount']))
+                                    if serializer.validated_data['project'].amount < (
+                                            amount + serializer.validated_data['amount']):
+                                        # overshoot
+                                        raise ValidationError(error_messages[1045])
+                                    else:
+                                        print("passed")
+
+                                else:
+                                    print("No Restriction")
+
+        elif (self.request_for == EXPENSE_REQUEST_TRAVEL):
+            from core.custom_serializers import TravelExpenseCustomSerializer
+            serializer = TravelExpenseCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+            # CHECK FOR x days Restriction
+
+            if self.sender:
+                if self.sender.template:
+                    if self.sender.template.expense_policy:
+                        if self.sender.template.expense_policy.allow_req:
+                            # restriction enabled
+                            # get todays date and applied for date
+
+                            no_of_days_allowed = self.sender.template.expense_policy.req_limit
+                            todays_date = date.today()
+                            if todays_date >= serializer.validated_data['applicable_date']:
+                                if (todays_date - serializer.validated_data[
+                                    'applicable_date']).days > no_of_days_allowed:
+
+                                    # CHECK FAILED RAISING ERROR
+                                    raise ValidationError(error_messages[1041])
+
+                                else:
+                                    print("check for restriction passed")
+                                    pass
+                            else:
+
+                                pass
+                        else:
+                            print("check for restriction disabled")
+
+                        if 'project' in serializer.validated_data:
+                            if serializer.validated_data['project']:
+                                # get object and check for restriction
+
+                                if serializer.validated_data['project'].restrict:
+                                    # Check for Amount
+                                    print("Restriction enabled")
+                                    amount = 0
+                                    amount = serializer.validated_data['project'].businessexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    amount += serializer.validated_data['project'].tripexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('total_amount'), 0))['amount']
+                                    amount += serializer.validated_data['project'].travelexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    print(amount)
+                                    print((serializer.validated_data['project'].amount))
+                                    print((serializer.validated_data['amount']))
+                                    if serializer.validated_data['project'].amount < (
+                                            amount + serializer.validated_data['amount']):
+                                        # overshoot
+                                        raise ValidationError(error_messages[1045])
+                                    else:
+                                        print("passed")
+
+                                else:
+                                    print("No Restriction")
+
+        elif (self.request_for == EXPENSE_REQUEST_TRIP):
+            print('Validating trip data from model.')
+            from core.custom_serializers import TripExpenseCustomSerializer, TripOtherExpenseCustomSerializer, \
+                TripAccommodationExpenseCustomSerializer, TripTravelExpenseSerializer, \
+                TripAdvanceExpenseCustomSerializer
+
+            total_trip_amount = 0
+            advance_request_amount = 0
+
+            if 'trip_expense' in request_data:
+                print((request_data['trip_expense']))
+                serializer_trip = TripExpenseCustomSerializer(data=request_data['trip_expense'])
+                serializer_trip.is_valid(raise_exception=True)
+
+            else:
+                raise ValidationError('Trip Expense Needed')
+
+            if 'trip_travel_expense' in request_data:
+                print((type(request_data)))
+                print((type(request_data['trip_travel_expense'])))
+
+                print((request_data['trip_travel_expense']))
+                serializer = TripTravelExpenseSerializer(data=request_data['trip_travel_expense'], many=True)
+                serializer.is_valid(raise_exception=True)
+
+                # add trip amount
+                for item in serializer.validated_data:
+                    if item['amount']:
+                        total_trip_amount = total_trip_amount + item['amount']
+
+            if 'trip_accommodation_expense' in request_data:
+                serializer = TripAccommodationExpenseCustomSerializer(data=request_data['trip_accommodation_expense'],
+                                                                      many=True)
+                serializer.is_valid(raise_exception=True)
+
+                # add trip amount
+                for item in serializer.validated_data:
+                    if item['amount']:
+                        total_trip_amount = total_trip_amount + item['amount']
+
+            if 'trip_other_expense' in request_data:
+                serializer = TripOtherExpenseCustomSerializer(data=request_data['trip_other_expense'], many=True)
+                serializer.is_valid(raise_exception=True)
+
+                # add trip amount
+                for item in serializer.validated_data:
+                    if item['amount']:
+                        total_trip_amount = total_trip_amount + item['amount']
+
+            if 'trip_advance_expense' in request_data:
+                serializer = TripAdvanceExpenseCustomSerializer(data=request_data['trip_advance_expense'], many=True)
+                serializer.is_valid(raise_exception=True)
+                for item in serializer.validated_data:
+                    if item['amount']:
+                        advance_request_amount += item['amount']
+
+            request_data['trip_expense']['total_amount'] = str(total_trip_amount)
+            request_data['trip_expense']['advance_request_amount'] = str(advance_request_amount)
+            print('Validated data')
+
+            self.request_data = json.dumps(request_data)
+
+            if self.sender:
+                if self.sender.template:
+                    if self.sender.template.expense_policy:
+                        if 'project' in serializer_trip.validated_data:
+                            if serializer_trip.validated_data['project']:
+                                # get object and check for restriction
+
+                                if serializer_trip.validated_data['project'].restrict:
+                                    # Check for Amount
+                                    print("Restriction enabled")
+                                    amount = 0
+                                    amount = serializer_trip.validated_data['project'].businessexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    amount += serializer_trip.validated_data['project'].tripexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('total_amount'), 0))['amount']
+                                    amount += serializer_trip.validated_data['project'].travelexpense_set.filter(
+                                        process__status__in=['PENDING', 'APPROVED']).aggregate(
+                                        amount=Coalesce(Sum('amount'), 0))['amount']
+                                    print(amount)
+                                    print((serializer_trip.validated_data['project'].amount))
+                                    if serializer_trip.validated_data['project'].amount < (amount + total_trip_amount):
+                                        # overshoot
+                                        raise ValidationError(error_messages[1045])
+                                    else:
+                                        print("passed")
+
+                                else:
+                                    print("No Restriction")
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_PI):
+            from core.custom_serializers import PersonalInformationCustomSerializer
+            serializer = PersonalInformationCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_FI):
+            from core.custom_serializers import FamilyInformationCustomSerializer
+            serializer = FamilyInformationCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_AD):
+            from core.custom_serializers import AcademicDetailCustomSerializer
+            serializer = AcademicDetailCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_VI):
+            from core.custom_serializers import VisaInformationCustomSerializer
+            serializer = VisaInformationCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_MH):
+            from core.custom_serializers import MedicalHistoryCustomSerializer
+            serializer = MedicalHistoryCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_VD):
+            from core.custom_serializers import VehicleDetailCustomSerializer
+            serializer = VehicleDetailCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_EX):
+            from core.custom_serializers import ExperienceCustomSerializer
+            serializer = ExperienceCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_AS):
+            from core.custom_serializers import AssetCustomSerializer
+            serializer = AssetCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_BI):
+            from core.custom_serializers import BankInformationCustomSerializer
+            serializer = BankInformationCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_SK):
+            from core.custom_serializers import SkillCustomSerializer
+            serializer = SkillCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+
+        elif (self.request_for == ESS_CHANGE_REQUEST_UD):
+            from core.custom_serializers import UserDocumentsCustomSerializer
+            serializer = UserDocumentsCustomSerializer(data=request_data)
+            serializer.is_valid(raise_exception=True)
+        elif (self.request_for == TIMESHEET):
+            # no need of validation
+            pass
+        else:
+            raise ValidationError('Process Request Not Allowed')
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class ProcessSupportingDoc(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_for = models.CharField(blank=True, null=True, choices=REQUEST_FOR_CHOICES, max_length=50)
+    file_name = models.CharField(blank=True, null=True, max_length=50)
+    code = models.CharField(blank=True, null=True, max_length=10)
+    supporting_docs = models.FileField(upload_to=request_supporting_file_name, null=True, max_length=255, blank=True,
+                                       storage=PrivateMediaStorage())
+    process = models.ForeignKey(Process, on_delete=models.PROTECT, blank=True, null=True,
+                                related_name='supporting_docs')
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return str(self.id)
+
+
+class Task(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    process = models.ForeignKey(Process, on_delete=models.PROTECT)
+    receiver = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    previous = models.ManyToManyField('self', symmetrical=False, related_name='leading', blank=True)
+    status = models.CharField(default=PENDING, choices=STATUS_CHOICES, max_length=30)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    comment = models.CharField(max_length=200, blank=True, null=True)
+    is_active = models.BooleanField(default=False)
+    processed = models.BooleanField(default=False)
+    action_performed_by = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='action_performed_on_task',
+                                            null=True)
+    approval_date = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class EmployeeNotification(models.Model):
+    READ = 'READ'
+    UNREAD = 'UNREAD'
+    CLEARED = 'CLEARED'
+
+    NOTIFICATION_STATUS_CHOICES = (
+        (READ, 'READ'),
+        (UNREAD, 'UNREAD'),
+        (CLEARED, 'CLEARED'),
+    )
+
+    GENERAL = "GENERAL"
+    ATTENDANCE = "ATTENDANCE"
+    LEAVE = "LEAVE"
+    EXPENSE = "EXPENSE"
+    ESS = "ESS"
+    ATTENDANCE_ADMIN = "ATTENDANCE_ADMIN"
+    LEAVE_ADMIN = "LEAVE_ADMIN"
+    EXPENSE_ADMIN = "EXPENSE_ADMIN"
+    ESS_ADMIN = "ESS_ADMIN"
+    TODO = "TODO"
+    Investment_Declaration = 'Investment Declaration'
+    TIMESHEET = "TIMESHEET"
+
+    NOTIFICATION_CATEGORY_CHOICES = (
+        (GENERAL, 'General'),
+        (ATTENDANCE, 'Attendance'),
+        (LEAVE, 'Leave'),
+        (EXPENSE, 'Expense'),
+        (ESS, 'Ess'),
+        (ATTENDANCE_ADMIN, 'Attendance Admin'),
+        (LEAVE_ADMIN, 'Leave Admin'),
+        (EXPENSE_ADMIN, 'Expense Admin'),
+        (ESS_ADMIN, 'Ess Admin'),
+        (TODO, 'Todo'),
+        (Investment_Declaration, 'Investment Declaration'),
+        (TIMESHEET, 'Timesheet Review'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    sender = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name="notification_by", null=True,
+                               blank=True)
+    category = models.CharField(max_length=1000, default=GENERAL, choices=NOTIFICATION_CATEGORY_CHOICES, null=True,
+                                blank=True)
+    title = models.CharField(max_length=100)
+    message = models.CharField(max_length=1000, null=True, blank=True)
+    time = models.DateTimeField(default=now, db_index=True)
+    status = models.CharField(default=UNREAD, choices=NOTIFICATION_STATUS_CHOICES, max_length=30, db_index=True)
+    process = models.ForeignKey(Process, on_delete=models.PROTECT, blank=True, null=True)
+    for_admin = models.BooleanField(default=False)
+    message_in_user_selected_language = models.CharField(blank=True, max_length=1000, null=True)
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        ordering = ['-time']
+
+
+class TenantConfiguration(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    settings_name = models.CharField(max_length=128, unique=True)
+    settings_value = models.CharField(max_length=128, unique=True)
+    settings_template = models.FileField(upload_to=tenant_config_file_name, null=True, max_length=255, blank=True,
+                                         storage=PrivateMediaStorage())
+
+
+class ProfileStatus(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.OneToOneField(Employee, on_delete=models.PROTECT)
+    status = models.BooleanField(default=False)
+
+
+class CompanyAnnouncement(models.Model):
+    """
+    This model is used to Store Announcement that needs to be shown company wide.
+
+    Version     Change Detail                                           -   Issue Tracker Number
+    1.0     -   Initial Build till date 28-May-2021                     -   NA
+    1.1     -   Changes to allow acceptable Announcement. Added         -   372
+                following new Fields: is_acceptable, employee,
+                organisation_unit, organisational_group
+
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=100)
+    description = models.CharField(max_length=5000, null=True, blank=True)
+    time = models.DateTimeField(default=now, db_index=True)
+    is_paused = models.BooleanField(default=False)
+    is_acceptable = models.BooleanField(default=False)
+    employee = models.ManyToManyField(Employee, related_name='companyannouncement')
+    organisational_unit = models.ManyToManyField(OrganisationalUnit, related_name='companyannouncement')
+    organisational_group = models.ManyToManyField(OrganisationalGroup, related_name='companyannouncement')
+    start_date = models.DateField(null=True, blank=False)
+    end_date = models.DateField(null=True, blank=False)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        ordering = ['-time']
+
+
+def random_image_file_name(instance, filename):
+    return '%s/%s/%s' % (connection.schema_name, '/randomFacts/img', filename)
+
+
+class CompanyDocument(AuditMixin, models.Model):
+    POLICY = 'Policy'
+    FORM = 'Form'
+
+    COMPANY_DOCUMENT_CHOICES = (
+        (POLICY, 'Policy'),
+        (FORM, 'Form'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    title = models.CharField(blank=True, max_length=100, null=True)
+    document = models.FileField(upload_to=user_doc_file_name, null=True, max_length=255, storage=PrivateMediaStorage())
+    document_type = models.CharField(blank=True, choices=COMPANY_DOCUMENT_CHOICES, max_length=15, null=True,
+                                     default=POLICY)
+    employee = models.ManyToManyField(Employee, related_name='companydocument')
+    organisational_unit = models.ManyToManyField(OrganisationalUnit, related_name='companydocument')
+    organisational_group = models.ManyToManyField(OrganisationalGroup, related_name='companydocument')
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    enable_acceptance = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        ordering = ['-updated_at']
+
+
+OU_TABLE_ORDER_COLUMN_CHOICES = Choices(
+
+    ('0', 'ou_name'),
+    ('1', 'is_active')
+
+)
+
+
+def query_ou_table(**kwargs):
+    draw = int(kwargs.get('draw', None)[0])
+    length = int(kwargs.get('length', None)[0])
+    start = int(kwargs.get('start', None)[0])
+    search_value = kwargs.get('search[value]', None)[0]
+    order_column = kwargs.get('order[0][column]', None)[0]
+    order = kwargs.get('order[0][dir]', None)[0]
+    print(order_column)
+
+    order_column = OU_TABLE_ORDER_COLUMN_CHOICES[order_column]
+    # django orm '-' -> desc
+    if order == 'desc':
+        order_column = '-' + order_column
+
+    queryset = OUNameValueMaster.objects.filter(is_active=True)
+    total = queryset.count()
+
+    if search_value:
+        queryset = queryset.filter(Q(ou_name__icontains=search_value) | Q(is_active__icontains=search_value))
+
+    count = queryset.count()
+    # queryset = queryset.order_by(order_column)[start:start + length]
+    print(queryset)
+    return {
+        'items': queryset,
+        'count': count,
+        'total': total,
+        'draw': draw
+    }
+
+
+EXPENSE_TABLE_ORDER_COLUMN_CHOICES = Choices(
+    ('0', 'created_at'),
+)
+
+
+def query_expenses(**kwargs):
+    draw = int(kwargs.get('draw', None)[0])
+    length = int(kwargs.get('length', None)[0])
+    start = int(kwargs.get('start', None)[0])
+    search_value = kwargs.get('search[value]', None)[0]
+    order_column = kwargs.get('order[0][column]', None)[0]
+    order = kwargs.get('order[0][dir]', None)[0]
+    print(order_column)
+
+    order_column = EXPENSE_TABLE_ORDER_COLUMN_CHOICES[order_column]
+    # django orm '-' -> desc
+    if order == 'desc':
+        order_column = '-' + order_column
+
+    queryset = Process.objects.filter(is_active=True)
+    total = queryset.count()
+
+    # if search_value:
+    #     queryset = queryset.filter(Q(ou_name__icontains=search_value) |
+    #                                     Q(is_active__icontains=search_value)
+    #                                     )
+
+    count = queryset.count()
+    # queryset = queryset.order_by(order_column)[start:start + length]
+    print(queryset)
+    return {
+        'items': queryset,
+        'count': count,
+        'total': total,
+        'draw': draw
+    }
+
+
+TEMPLATE_TABLE_ORDER_COLUMN_CHOICES = Choices(
+
+    ('0', 'name'),
+
+)
+
+
+def query_template(**kwargs):
+    print(("inside template", kwargs))
+    draw = int(kwargs.get('draw', None)[0])
+    length = int(kwargs.get('length', None)[0])
+    start = int(kwargs.get('start', None)[0])
+    search_value = kwargs.get('search[value]', None)[0]
+    order_column = kwargs.get('order[0][column]', None)[0]
+    order = kwargs.get('order[0][dir]', None)[0]
+    print(order_column)
+
+    order_column = TEMPLATE_TABLE_ORDER_COLUMN_CHOICES[order_column]
+    # django orm '-' -> desc
+    if order == 'desc':
+        order_column = '-' + order_column
+
+    queryset = OUNameValueMaster.objects.filter(is_active=True)
+    total = queryset.count()
+
+    if search_value:
+        queryset = queryset.filter(Q(name__icontains=search_value))
+
+    count = queryset.count()
+    # queryset = queryset.order_by(order_column)[start:start + length]
+    print(queryset)
+    return {
+        'items': queryset,
+        'count': count,
+        'total': total,
+        'draw': draw
+    }
+
+
+class PolicyAccept(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    company_doc = models.ForeignKey(CompanyDocument, on_delete=models.PROTECT)
+    is_accepted = models.BooleanField(default=False)
+    accepted_date = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+
+class EmployeeStatusLog(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, )
+    employee_status = models.CharField(blank=False, default=ACTIVE, choices=EMPLOYEE_STATUS_CHOICES, max_length=30,
+                                       db_index=True)
+    created = models.BooleanField(default=False)
+    date = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date']
+
+
+TEXT = "TextField"  # This type will help store textbox data such as address.
+CHAR = "CharField"  # This type will help store character data.
+DATE = "DateField"  # This type will help store date.
+DATE_TIME = "DateTimeField"  # This type will help store date & time.
+INTEGER = "PositiveIntegerField"  # This type will help to store values positive numbers.
+NUMBER = "NumberField"  # This type will help to store amount if any.
+EMAIL = "EmailField"  # This type will help to store and validate email data.
+CHOICE = "DropDownItem"  # This type will help when data to be shown has list of items where one can be selected.
+
+FIELD_TYPE_CHOICES = (
+    (CHAR, 'Char'),
+    (DATE, 'Date'),
+    (DATE_TIME, 'Date Time'),
+    (INTEGER, 'Integer'),
+    (NUMBER, 'Number'),
+    (EMAIL, 'Email'),
+    (CHOICE, 'Choice')
+)
+
+
+class ReassignmentFieldDetail(models.Model):
+    """
+    This model will help store fields & its type whose data history needs to be retained.
+    This table is used as reference in ``EmployeeReassignmentFieldDetailValues`` table to store the values of the fields defined.
+
+    ``internal_code`` - is used to store the value of attribute "name" in <input> tag in HTML page.
+    ``display_text`` - is used to store the value of text to be shown via <label> tag before <input> tag in HTML page.
+    ``type_of_field`` - is used to store the data that will help decide value of the attribute "type" in <input> tag in HTML page.
+    ``choice_field_options`` - is used to store Drop Down values when type_of_field is Choice.
+    ``report_display_order`` - this is used to sort Fields in Custom order if any required.
+    ``is_active`` - is used to consider if the field needs to be shown or not. False usually means field is no longer required to be shown.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    display_text = models.CharField(max_length=50, null=False, blank=False)
+    internal_code = models.CharField(max_length=20, null=False, blank=False, db_index=True, unique=True)
+    type_of_field = models.CharField(max_length=20, default=CHAR, choices=FIELD_TYPE_CHOICES, null=False, blank=False,
+                                     db_index=True)
+    choice_field_options = models.CharField(max_length=2000, null=True, blank=True)
+    report_display_order = models.IntegerField(null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.display_text
+
+    def clean(self):
+        if self.type_of_field == 'Choice' and self.choice_field_options is None:
+            raise ValidationError('For Type Of Field Chohice, value for field choice_field_options can not be empty.')
+        elif self.choice_field_options is not None and 'options' not in json.loads(self.choice_field_options):
+            raise ValidationError('Value for field choice_field_options needs to have Key Value pair of "options".')
+
+    class Meta:
+        ordering = ['internal_code']
+
+
+class EmployeeReassignmentFieldDetail(models.Model):
+    """
+    Table is used to store historic data of any field in the table.
+    ``data`` - column will hold the value of data entered by user for field declared in ReassignmentFieldDetail table.
+    ``display_order`` - is used to consider the Sequence of display in the HTML page. Higher the number more the preference.
+    ``is_active`` - is used to consider if the field data needs to be shown or not. False usually means data is no longer required to be shown.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reassignment = models.ForeignKey(ReassignmentFieldDetail, on_delete=models.PROTECT, db_index=True)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, db_index=True)
+    data = models.TextField(max_length=500, null=True, blank=True)
+    display_order = models.PositiveIntegerField(null=False, blank=False, db_index=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['employee', 'reassignment', '-display_order']
+        unique_together = ('reassignment', 'employee', 'display_order')
+
+    def clean(self):
+        error_message = 'Entered value does not match required format. Please check and try again.'
+        type_of_field = self.reassignment.type_of_field
+        received_data = self.data
+        if type_of_field == 'Char' and not isinstance(received_data, str):
+            raise ValidationError(error_message)
+        elif type_of_field == 'Integer' and not isinstance(received_data, int):
+            raise ValidationError(error_message)
+        elif type_of_field == 'Number' and not isinstance(received_data, Decimal):
+            raise ValidationError(error_message)
+        elif type_of_field == 'Email' and not isinstance(received_data, str):
+            raise ValidationError(error_message)
+        elif type_of_field == 'Date' and not isinstance(received_data, date):
+            raise ValidationError(error_message)
+        elif type_of_field == 'Date Time' and not isinstance(received_data, datetime):
+            raise ValidationError(error_message)
+        elif type_of_field == 'Choice':
+            try:
+                choice_field_options = json.loads(self.reassignment.choice_field_options)
+                choice_field_options = choice_field_options['options']
+
+            except ValueError as e:
+                print(str(e))
+                raise ValidationError("The selected option is not available. Plaase check and try again.")
+
+            except Exception as e:
+                print(str(e))
+                raise ValidationError("The selected option is not available. Plaase check and try again.")
+
+            if received_data not in choice_field_options:
+                raise ValidationError("The selected option is not available. Plaase check and try again.")
+
+
+class EmployeeOUReassignmentDetail(models.Model):
+    """
+    This Model is used to store the history of the OUs assigned to particular Employee.
+    ``ou_name_value`` - this column holds reference to OU within company - such as Designation, Location, etc.
+    ``old_ou_value`` - this column holds reference to previous OU Value assigned to Employee - such as Software Developer for Designation, Mumbai for Location, etc.
+    ``new_ou_value`` - this column holds reference to new OU Value assigned to Employee - such as Sr. Software Developer for Designation, Fort - Mumbai for Location, etc.
+    ``display_order`` - is used to consider the Sequence of display in the HTML page. Higher the number more the preference.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, db_index=True)
+    ou_name_value = models.ForeignKey(OUNameValueMaster, null=False, db_index=True)
+    old_ou_value = models.ForeignKey(OrganisationalUnit, null=True, related_name='reassignment_old_ou_value')
+    new_ou_value = models.ForeignKey(OrganisationalUnit, null=True, related_name='reassignment_new_ou_value')
+    display_order = models.PositiveIntegerField(null=False, blank=False, db_index=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Specify default ordering for Model when queried
+        ordering = ['employee', 'ou_name_value', '-display_order']
+        unique_together = ('employee', 'ou_name_value', 'old_ou_value', 'new_ou_value', 'display_order')
+
+
+NOT_SHOWN = 0
+ACCEPTED = 1
+SKIPPED = 2
+DECLINED = 3
+
+ANNOUNCEMENT_CHOICE = (
+    (NOT_SHOWN, 'Announcement not shown to Employee yet'),
+    (ACCEPTED, 'Announcement Accepted by Employee'),
+    (SKIPPED, 'Announcement seen by Employee but skipped for Acceptance'),
+    (DECLINED, 'Announcement Declined to be Accepted by Employee')
+)
+
+
+class AnnouncementAcceptanceStatus(models.Model):
+    """
+    This model is used to create entries for Employees to whom Acceptance Announcement needs to be shown.
+
+    Version     Change Detail                                           -   Issue Tracker Number
+    1.0     -   New Model to store Acceptance Status of Acceptable      -   372
+                Announcement Status
+
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT)
+    company_announcement = models.ForeignKey(CompanyAnnouncement, on_delete=models.PROTECT)
+    acceptance_status = models.CharField(max_length=20, choices=ANNOUNCEMENT_CHOICE, default=NOT_SHOWN)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+
+class PolicyGrid(models.Model):
+    POLICY_GRID_STATUS_CHOICES = (
+        (ACTIVATED, 'Activated'), (DEACTIVATED, 'Deactivated'), (DEFAULT, 'Default'),
+    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    system_code = models.CharField(max_length=50, null=True, blank=True, unique=True)
+
+    module_sequence_number = models.IntegerField(default=0)
+    module_title = models.CharField(max_length=200)
+    module_description = models.TextField(null=True, blank=True)
+    module_status = models.IntegerField(choices=POLICY_GRID_STATUS_CHOICES, default=DEACTIVATED)
+
+    field_sequence_number = models.IntegerField(default=0)
+    field_title = models.CharField(max_length=200)
+    field_description = models.TextField(null=True, blank=True)
+    field_value = models.IntegerField(default=0)
+    field_url = models.CharField(max_length=200, null=True, blank=True)
+    field_help_text = models.CharField(max_length=500, null=True, blank=True)
+
+    action_text = models.CharField(max_length=200, null=True, blank=True)
+    action_value = models.IntegerField(default=0)
+    action_url = models.CharField(max_length=200, null=True, blank=True)
+    action_detail = models.TextField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.module_title + ' - ' + self.field_title
+
+    class Meta:
+        unique_together = (('module_title', 'field_title'), ('module_sequence_number', 'field_sequence_number'))

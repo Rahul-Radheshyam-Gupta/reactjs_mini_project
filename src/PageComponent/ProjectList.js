@@ -8,7 +8,7 @@ class CollapseAccordion extends React.Component{
             {
                 'title' : 'Tic Toe Game Using React JS',
                 'skillsUsed' : ['React Js,', ' Bootstrap, ', ' Jquery', 'CSS'],
-                'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/'
+                'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/#/tictoe'
             },
             {
                 'title' : 'Portfolio using React JS',
@@ -16,12 +16,12 @@ class CollapseAccordion extends React.Component{
                 'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/'
             },
             {
-                'title' : 'Portfolio Using Django RestFramework',
+                'title' : 'Portfolio Using Django',
                 'skillsUsed' : ['Python,',' Django,', ' Bootstrap,', ' Jquery,', ' HTML & CSS'],
                 'demo_link' : 'https://rahulgupta1996.pythonanywhere.com/'
             },
             {
-                'title' : 'Basic Eccommerce Using Django RestFramework',
+                'title' : 'Basic Eccommerce Using Django',
                 'skillsUsed' : ['Python,',' Django,', 'Bootstrap,', ' Jquery,', ' HTML & CSS'],
                 'demo_link' : 'https://rahulgupta1995.pythonanywhere.com/'
             },

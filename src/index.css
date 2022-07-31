@@ -28,7 +28,8 @@ code {
 .game{
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  /* justify-content: center; */
+  height: 90vh;
 }
 .board{
   margin: 20px 0 30px 0;

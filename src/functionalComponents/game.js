@@ -1,6 +1,7 @@
 import {useState} from 'react';
 import Board from "./board";     
-const Game = () => {
+const Game = (props) => {
+    console.log("Game Props", props)
     const [stepNumber, setStepNumber] = useState(0);                             
     const [xIsNext, setXIsNext] = useState(true);  
     const [history, setHistory] = useState([{ squares : Array(9).fill(null) },]);
@@ -28,7 +29,7 @@ const Game = () => {
     })
 
     return (
-      <div className="game">
+      <div className="game" style={ props.isDarkMode ? {'color': 'white'} : {'color': 'black'} }>
         <h1
           style={{
             textAlign: "center",

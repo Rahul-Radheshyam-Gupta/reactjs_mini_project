@@ -7,7 +7,7 @@ class CollapseAccordion extends React.Component{
         return (
           <Accordion defaultActiveKey="0">
             <Accordion.Item eventKey="0">
-              <Accordion.Header>Experiences</Accordion.Header>
+              <Accordion.Header> Experiences</Accordion.Header>
               <Accordion.Body>
                 <ListGroup>
                   <ListGroup.Item variant="dark">
@@ -23,7 +23,7 @@ class CollapseAccordion extends React.Component{
               </Accordion.Body>
             </Accordion.Item>
             <Accordion.Item eventKey="1">
-              <Accordion.Header>Set of Skills</Accordion.Header>
+              <Accordion.Header> Set of Skills</Accordion.Header>
               <Accordion.Body>
                 <ListGroup>
                   <ListGroup.Item variant="dark">Python</ListGroup.Item>
@@ -50,7 +50,7 @@ class CollapseAccordion extends React.Component{
               </Accordion.Body>
             </Accordion.Item>
             <Accordion.Item eventKey="3">
-              <Accordion.Header>Education Details</Accordion.Header>
+              <Accordion.Header> Education Details</Accordion.Header>
               <Accordion.Body>
                 <ListGroup>
                   <ListGroup.Item variant="dark"

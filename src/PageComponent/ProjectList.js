@@ -28,13 +28,16 @@ class CollapseAccordion extends React.Component{
 
         ]
 
-        let projects = project_list.map( (project)=>{
+        let projects = project_list.map( (project,i)=>{
             return (
-                <ListGroup.Item variant="dark" as="li"  className="d-flex justify-content-between align-items-start">
+                <ListGroup.Item variant="dark" as="li" key={i} className="d-flex justify-content-between align-items-start">
                     <div className="ms-2 me-auto">
-                        <div className="fw-bold pull-left"> {project.title} </div>
+                        <div className="fw-bold pull-left">
+                          <a href={project.demo_link} className='text-dark' target='_blank' style={{textDecoration:'none'}}>
+                            <i class="bi bi-cursor"></i> {project.title} 
+                          </a>
+                          </div>
                         <small> Skills :  {project.skillsUsed}</small><br />
-                        <Button className="link_btn" variant="secondary" as="a" size="sm" href={project.demo_link} target='_blank'> View Website </Button>
                     </div>
               </ListGroup.Item>
             )
@@ -42,9 +45,9 @@ class CollapseAccordion extends React.Component{
 
         let interest_list = ['Machine Learning', 'Internet of Things', 'Data Science']
 
-        let interests = interest_list.map( (interest)=>{
+        let interests = interest_list.map( (interest, i)=>{
             return (
-                <ListGroup.Item variant="dark" as="li"  className="d-flex justify-content-between align-items-start">
+                <ListGroup.Item variant="dark" as="li" key={i} className="d-flex justify-content-between align-items-start">
                     <div className="ms-2 me-auto">
                         <div className="fw-bold pull-left"> {interest} </div>
                     </div>
@@ -53,13 +56,13 @@ class CollapseAccordion extends React.Component{
         } )
 
         let social_media_link_list = [
-            ["https://www.linkedin.com/in/rahul-gupta-1b2578170/","Linkedin"],
-            ["https://github.com/Rahul-Radheshyam-Gupta", "GitHub"],
-            ["mrrahulgupta0096@gmail.com", "Gmail"]
+            ["https://www.linkedin.com/in/rahul-gupta-1b2578170/",<i class="bi bi-linkedin"></i>, false],
+            ["https://github.com/Rahul-Radheshyam-Gupta", <i class="bi bi-github"></i>, false],
+            ["mrrahulgupta0096@gmail.com", <i class="bi bi-envelope-check"></i>, true]
         ]
         let social_media_links = social_media_link_list.map( (social_media)=>{
             return (
-                <ListGroup.Item variant="dark" as="a" href={ social_media[1] === "Gmail" ? ("mailto:"+social_media[0]) : social_media[0] } target='_blank'  className="d-flex justify-content-between align-items-start">
+                <ListGroup.Item variant="dark" as="a" href={ social_media[2] ? ("mailto:"+social_media[0]) : social_media[0] } target='_blank'  className="d-flex justify-content-between align-items-start pl-5 pr-5">
                     <div className="ms-2 me-auto">
                         <div className="fw-bold pull-left"> {social_media[1]  }  </div>
                     </div>
@@ -69,7 +72,7 @@ class CollapseAccordion extends React.Component{
         return (
           <Accordion defaultActiveKey="1">
             <Accordion.Item eventKey="1">
-              <Accordion.Header>Projects</Accordion.Header>
+              <Accordion.Header> Projects</Accordion.Header>
               <Accordion.Body>
                 <ListGroup>
                  {projects}
@@ -77,7 +80,7 @@ class CollapseAccordion extends React.Component{
               </Accordion.Body>
             </Accordion.Item>
             <Accordion.Item eventKey="2">
-              <Accordion.Header>Interests</Accordion.Header>
+              <Accordion.Header> Interests</Accordion.Header>
               <Accordion.Body>
                 <ListGroup>
                  {interests}
@@ -85,9 +88,9 @@ class CollapseAccordion extends React.Component{
               </Accordion.Body>
             </Accordion.Item>
             <Accordion.Item eventKey="3">
-              <Accordion.Header>Contact Detail</Accordion.Header>
+              <Accordion.Header>C ontact Detail</Accordion.Header>
               <Accordion.Body>
-                <ListGroup horizontal>
+                <ListGroup horizontal style={{margin:'2px 40px'}}>
                     {social_media_links}
                 </ListGroup>
               </Accordion.Body>

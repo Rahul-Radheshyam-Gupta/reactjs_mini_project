@@ -1,15 +1,15 @@
 {
   "files": {
-    "main.css": "/reactjs_mini_project/static/css/main.c060afb0.css",
-    "main.js": "/reactjs_mini_project/static/js/main.5efb89d7.js",
+    "main.css": "/reactjs_mini_project/static/css/main.5b6112b5.css",
+    "main.js": "/reactjs_mini_project/static/js/main.1d4c964e.js",
     "static/media/my_profile.jpg": "/reactjs_mini_project/static/media/my_profile.975fbde2882211f13b77.jpg",
     "static/media/rahul_cv.pdf": "/reactjs_mini_project/static/media/rahul_cv.b322ee3334aa180382bf.pdf",
     "index.html": "/reactjs_mini_project/index.html",
-    "main.c060afb0.css.map": "/reactjs_mini_project/static/css/main.c060afb0.css.map",
-    "main.5efb89d7.js.map": "/reactjs_mini_project/static/js/main.5efb89d7.js.map"
+    "main.5b6112b5.css.map": "/reactjs_mini_project/static/css/main.5b6112b5.css.map",
+    "main.1d4c964e.js.map": "/reactjs_mini_project/static/js/main.1d4c964e.js.map"
   },
   "entrypoints": [
-    "static/css/main.c060afb0.css",
-    "static/js/main.5efb89d7.js"
+    "static/css/main.5b6112b5.css",
+    "static/js/main.1d4c964e.js"
   ]
 }

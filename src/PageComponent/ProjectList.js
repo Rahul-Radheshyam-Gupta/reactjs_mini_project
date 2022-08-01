@@ -88,7 +88,7 @@ class CollapseAccordion extends React.Component{
               </Accordion.Body>
             </Accordion.Item>
             <Accordion.Item eventKey="3">
-              <Accordion.Header>C ontact Detail</Accordion.Header>
+              <Accordion.Header>Contact Detail</Accordion.Header>
               <Accordion.Body>
                 <ListGroup horizontal style={{margin:'2px 40px'}}>
                     {social_media_links}

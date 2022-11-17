@@ -12,6 +12,8 @@ const lightTheme = {
   text: 'black',
   toggleBorder: 'white',
   background: '#ddd',
+  height:"fit-content",
+  minHeight:"100vh"
 }
 const darkTheme = {
   body: 'black',
@@ -19,6 +21,9 @@ const darkTheme = {
   toggleBorder: 'black',
   background: 'rgba(0,0,0,0.8)',
   color:'black',
+  height:"fit-content",
+  minHeight:"100vh"
+
 }
 const lightThemeBtn = {
   color:'white',
@@ -62,10 +67,7 @@ class Dashboard extends React.Component{
     render(){
         return (
           <div style={ this.state.isDarkMode ? darkTheme : lightTheme } className={ this.state.isDarkMode ? 'darkTheme' : 'lightTheme' } >
-            <div marginBottom="30px">
-                <Navigation />
-                <span onClick={ ()=>{ this.darkModeHandling() } } className='btn btn-sm border-0' style={ this.state.isDarkMode ? darkThemeBtn : lightThemeBtn }>{ this.state.isDarkMode ? <i class="bi bi-sun"></i> : <i class="bi bi-moon"></i> }</span>
-            </div>
+            <span onClick={ ()=>{ this.darkModeHandling() } } className='btn btn-sm border-0' style={ this.state.isDarkMode ? darkThemeBtn : lightThemeBtn }>{ this.state.isDarkMode ? <i class="bi bi-sun"></i> : <i class="bi bi-moon"></i> }</span>
             <Routes>
               <Route exact path="/" element={<Home />}>
                 

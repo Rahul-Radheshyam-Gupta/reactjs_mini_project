@@ -22,14 +22,19 @@ class CollapseAccordion extends React.Component{
               'demo_link' : 'https://rahulgupta1996.pythonanywhere.com/'
             },
             {
+                'title' : 'Basic Eccommerce Using Django',
+                'skillsUsed' : ['Python,',' Django,', 'Bootstrap,', ' Jquery,', ' HTML & CSS'],
+                'demo_link' : 'https://rahulgupta1995.pythonanywhere.com/'
+            },
+            {
                 'title' : 'Portfolio using React JS',
                 'skillsUsed' : ['React Js,', ' Bootstrap, ', ' Jquery', 'CSS'],
                 'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/'
             },
             {
-                'title' : 'Basic Eccommerce Using Django',
-                'skillsUsed' : ['Python,',' Django,', 'Bootstrap,', ' Jquery,', ' HTML & CSS'],
-                'demo_link' : 'https://rahulgupta1995.pythonanywhere.com/'
+              'title' : 'Tic Toe Game',
+              'skillsUsed' : ['React Js,', 'CSS'],
+              'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/#/tictoe'
             },
 
         ]

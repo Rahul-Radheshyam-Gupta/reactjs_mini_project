@@ -15,7 +15,7 @@ class Home extends React.Component{
               <Col sm>
                 <div>
                   <Card className="profile-card">
-                    <Card.Img style={{width: '84%', margin: '15px auto'}} variant="top" src={profile_pic} />
+                    <Card.Img style={{width: '50%', margin: '15px auto', borderRadius:"10px", boxShadow:"1px 0px 17px 1px rgba(173,142,142,0.75)"}} variant="top" src={profile_pic} />
                     <Card.Body>
                       <Card.Title>Mr. Rahul Gupta </Card.Title>
                       <Card.Text className='small font-monospace'>

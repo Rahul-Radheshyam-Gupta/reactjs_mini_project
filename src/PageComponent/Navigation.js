@@ -22,9 +22,6 @@ function Navigation() {
             <Nav.Item>
                 <Link className="link-btn" style={btn_style} to="/tictoe">Tic Toe Game</Link>
             </Nav.Item>
-            <Nav.Item>
-                <Link className="link-btn disabled" style={btn_style} to="/django_projects">Django Projects</Link>
-            </Nav.Item>
         </Container>
     </Navbar>
 

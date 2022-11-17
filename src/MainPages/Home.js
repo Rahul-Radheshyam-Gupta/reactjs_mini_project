@@ -20,7 +20,7 @@ class Home extends React.Component{
                       <Card.Title>Mr. Rahul Gupta </Card.Title>
                       <Card.Text className='small font-monospace'>
                         Hi, I am a passionated software developer.
-                        Working on many cool technologies like Django, Python, Jquery and etc.
+                        Working on many cool technologies like Django, Python, React JS, Jquery and etc.
                       </Card.Text>
                       <Button as="a" size="sm" href={rahul_cv} target="_blank" variant="primary">Download CV </Button>
                     </Card.Body>

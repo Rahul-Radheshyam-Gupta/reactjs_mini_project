@@ -17,7 +17,7 @@ function Navigation() {
     <Navbar bg="dark" sticky="top" variant="pills" defaultActiveKey="/home">
         <Container>
             <Nav.Item>
-                <Link className="link-btn" style={btn_style} to="/">My Portfolio</Link>
+                <Link className="link-btn" style={btn_style} to="/">Portfolio</Link>
             </Nav.Item>
             <Nav.Item>
                 <Link className="link-btn" style={btn_style} to="/tictoe">Tic Toe Game</Link>

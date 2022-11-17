@@ -12,13 +12,13 @@ class CollapseAccordion extends React.Component{
                 <ListGroup>
                   <ListGroup.Item variant="dark">
                   {/* TeamNest is a cloud platform to simplify HR services for organizations of all sizes. */}
-                    I am working as a software developer at <strong>Teamnest HR Solutions Pvt. Ltd. 
-                    with total experience of 3 years </strong>. 
-                    <br/>There, I am working with a team to develop a HRMS software.
-                    I use <strong>django and django rest framework</strong> to create APIs and integrate it with the frontend pages those are created using <strong>JavaScript, Jquary, Html, Css and themes</strong>.
-                    <br/>I do <strong>complete development, bug fixing and have good debugging skill</strong>.
-                    I also know React Js and recently I created some cool mini projects like tic toe game, portfolio and still .
-                    </ListGroup.Item>
+                  Worked as a Software Developer, involved in project management activities to take
+                  critical decisions for Product stability, Performance improvement/optimization, and
+                  building time-critical features & APIs from scratch.<br />
+                  Along with the development, I have done the optimization for many existing features to
+                  enhance the client experience and this helps the business to grow faster in the last 3
+                  years.
+                  </ListGroup.Item>
                 </ListGroup>
               </Accordion.Body>
             </Accordion.Item>
@@ -29,7 +29,7 @@ class CollapseAccordion extends React.Component{
                   <ListGroup.Item variant="dark">Python</ListGroup.Item>
                   <ListGroup.Item variant="dark">Django</ListGroup.Item>
                   <ListGroup.Item variant="dark">
-                    DRF - Restful API
+                    Django REST framework 
                   </ListGroup.Item>
                   <ListGroup.Item variant="dark">
                     SQL, PostgreSQL and MSSQL
@@ -37,15 +37,17 @@ class CollapseAccordion extends React.Component{
                   <ListGroup.Item variant="dark">
                     Python Libraries like Pandas, Numpy
                   </ListGroup.Item>
-                  <ListGroup.Item variant="dark">
-                    JQuary and JavaScript
-                  </ListGroup.Item>
                   <ListGroup.Item variant="dark">HTML and CSS3</ListGroup.Item>
-                  <ListGroup.Item variant="dark">Ract JS</ListGroup.Item>
                   <ListGroup.Item variant="dark">
-                    Bootstrap and Other Themes
+                    JavaScript and JQuary
                   </ListGroup.Item>
-                  
+                  <ListGroup.Item variant="dark">React JS</ListGroup.Item>
+                  <ListGroup.Item variant="dark">
+                    Material UI
+                  </ListGroup.Item>
+                  <ListGroup.Item variant="dark">
+                    Bootstrap
+                  </ListGroup.Item>                  
                 </ListGroup>
               </Accordion.Body>
             </Accordion.Item>

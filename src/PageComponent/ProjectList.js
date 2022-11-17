@@ -6,19 +6,25 @@ class CollapseAccordion extends React.Component{
     render(){
         let project_list = [ 
             {
-                'title' : 'Tic Toe Game Using React JS',
-                'skillsUsed' : ['React Js,', ' Bootstrap, ', ' Jquery', 'CSS'],
-                'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/#/tictoe'
+                'title' : 'Social Media Website',
+                'skillsUsed' : ['React Js,', ' Material UI, ', 'Flexbox Css'],
+                'demo_link' : 'https://social-app-rk.herokuapp.com/'
+            },
+            {
+                'title' : 'Admin Dashboard',
+                'skillsUsed' : ['React Js,', ' Flexbox CSS, ', ' React Charts'],
+                'demo_link' : 'https://smart-admin-dashboard.herokuapp.com/'
+            },
+
+            {
+              'title' : ' Smart Question Answer Community Page',
+              'skillsUsed' : ['Django', ' DRF, ', 'JWT, ', ' Bootstrap, ', 'JQuery'],
+              'demo_link' : 'https://rahulgupta1996.pythonanywhere.com/'
             },
             {
                 'title' : 'Portfolio using React JS',
                 'skillsUsed' : ['React Js,', ' Bootstrap, ', ' Jquery', 'CSS'],
                 'demo_link' : 'https://rahul-radheshyam-gupta.github.io/reactjs_mini_project/'
-            },
-            {
-                'title' : 'Portfolio Using Django',
-                'skillsUsed' : ['Python,',' Django,', ' Bootstrap,', ' Jquery,', ' HTML & CSS'],
-                'demo_link' : 'https://rahulgupta1996.pythonanywhere.com/'
             },
             {
                 'title' : 'Basic Eccommerce Using Django',

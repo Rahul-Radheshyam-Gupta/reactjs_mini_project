@@ -8,12 +8,12 @@ class CollapseAccordion extends React.Component{
             {
                 'title' : 'Social Media Website',
                 'skillsUsed' : ['React Js,', ' Material UI, ', 'Flexbox Css'],
-                'demo_link' : 'https://social-app-rk.herokuapp.com/'
+                'demo_link' : 'https://social-app-by-rk.onrender.com/'
             },
             {
                 'title' : 'Admin Dashboard',
                 'skillsUsed' : ['React Js,', ' Flexbox CSS, ', ' React Charts'],
-                'demo_link' : 'https://smart-admin-dashboard.herokuapp.com/'
+                'demo_link' : 'https://admin-dashboard-by-rk.onrender.com/'
             },
 
             {
